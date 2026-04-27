@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "name": "WASM",
+            "includePath": [
+                "${workspaceFolder}/src/wasm",
+                "${workspaceFolder}/src/wasm/vendor",
+                "${workspaceFolder}/src/wasm/vendor/libc"
+            ],
+            "defines": [
+                "STB_SPRINTF_NOFLOAT"
+            ],
+            "cStandard": "c17"
+        }
+    ],
+    "version": 4
+}

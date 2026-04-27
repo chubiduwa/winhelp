@@ -1,0 +1,205 @@
+/* Liberation Sans → MS Sans Serif, Helv, System */
+@font-face { font-family: "MS Sans Serif"; src: url(fonts/liberation_sans.woff2) format("woff2"); font-weight: normal; font-style: normal; }
+@font-face { font-family: "MS Sans Serif"; src: url(fonts/liberation_sans_bold.woff2) format("woff2"); font-weight: bold; font-style: normal; }
+@font-face { font-family: "MS Sans Serif"; src: url(fonts/liberation_sans_italic.woff2) format("woff2"); font-weight: normal; font-style: italic; }
+@font-face { font-family: "MS Sans Serif"; src: url(fonts/liberation_sans_bolditalic.woff2) format("woff2"); font-weight: bold; font-style: italic; }
+@font-face { font-family: "Helv"; src: url(fonts/liberation_sans.woff2) format("woff2"); font-weight: normal; font-style: normal; }
+@font-face { font-family: "Helv"; src: url(fonts/liberation_sans_bold.woff2) format("woff2"); font-weight: bold; font-style: normal; }
+@font-face { font-family: "System"; src: url(fonts/liberation_sans_bold.woff2) format("woff2"); }
+/* Liberation Mono → Courier */
+@font-face { font-family: "Courier"; src: url(fonts/liberation_mono.woff2) format("woff2"); font-weight: normal; font-style: normal; }
+@font-face { font-family: "Courier"; src: url(fonts/liberation_mono_bold.woff2) format("woff2"); font-weight: bold; font-style: normal; }
+@font-face { font-family: "Courier"; src: url(fonts/liberation_mono_italic.woff2) format("woff2"); font-weight: normal; font-style: italic; }
+@font-face { font-family: "Courier"; src: url(fonts/liberation_mono_bolditalic.woff2) format("woff2"); font-weight: bold; font-style: italic; }
+/* Fixedsys Excelsior → Fixedsys */
+@font-face { font-family: "Fixedsys"; src: url(fonts/fixedsys_excelsior.woff2) format("woff2"); }
+/* Wine outline fonts (Tahoma, Symbol, Wingdings, Marlett) */
+@font-face { font-family: "Tahoma"; src: url(fonts/tahoma.woff2) format("woff2"); font-weight: normal; }
+@font-face { font-family: "Tahoma"; src: url(fonts/tahomabd.woff2) format("woff2"); font-weight: bold; }
+@font-face { font-family: "Symbol"; src: url(fonts/symbol.woff2) format("woff2"); }
+@font-face { font-family: "Wingdings"; src: url(fonts/wingding.woff2) format("woff2"); }
+@font-face { font-family: "Marlett"; src: url(fonts/marlett.woff2) format("woff2"); }
+
+body {
+    font-family: "MS Sans Serif", "Arial", sans-serif;
+    font-size: 10pt;
+    margin: 0;
+    padding: 0;
+    background: #c0c0c0;
+}
+
+#container { margin: 0 16px 16px; }
+
+#sticky {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: #c0c0c0;
+}
+
+#app {
+    padding-top: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #000;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+#app .app-spacer { margin-left: auto; }
+
+.hlp-header {
+    background: linear-gradient(to right, #00007f, #1084d0);
+    color: #fff;
+    padding: 6px;
+    font-size: 9pt;
+    border: 1px solid #000;
+    border-top: none;
+}
+.hlp-header-file { font-weight: bold; }
+.hlp-header-page { color: #ddd; }
+
+.hlp-toolbar {
+    display: flex;
+    padding: 6px;
+    border-left: 1px solid #000;
+    border-right: 1px solid #000;
+    border-bottom: 1px solid #000;
+    background: #fff;
+}
+.hlp-toolbar button {
+    margin-right: 4px;
+    padding: 2px 8px;
+}
+button.hlp-toolbar-right { margin-left: auto; margin-right: 0; }
+
+.hlp-nsr {
+    padding: 6px;
+    border: 1px solid #000;
+    border-top: none;
+    background: #fff;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+
+#content {
+    background: #fff;
+    padding: 8px;
+    border: 1px solid #000;
+    border-top: none;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+}
+
+.hlp-para { margin: 0; tab-size: 8; clear: both; }
+.hlp-para::before { content: '\200B'; }
+.hlp-table { border-collapse: collapse; }
+.hlp-table td { padding: 1px 3px; vertical-align: top; }
+
+a.hlp-link-jump, a.hlp-link-jump span { color: #008000; text-decoration: underline; cursor: pointer; }
+a.hlp-link-jump:visited, a.hlp-link-jump:visited span { color: #005000; }
+a.hlp-link-popup, a.hlp-link-popup span { color: #008000; text-decoration: underline dotted; cursor: pointer; }
+a.hlp-link-macro, a.hlp-link-macro span { color: #008000; cursor: pointer; }
+
+#hlp-popup {
+    position: fixed;
+    background: #ffffcc;
+    border: 1px solid #000;
+    padding: 8px;
+    max-width: calc(100vw - 32px);
+    max-height: calc(100vh - 32px);
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    box-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    z-index: 100;
+}
+
+.hlp-welcome {
+    text-align: center;
+    padding: 48px 16px;
+    color: #444;
+}
+.hlp-welcome h1 {
+    font-size: 32pt;
+    color: #000;
+    margin: 0 0 8px 0;
+}
+.hlp-welcome-icon {
+    vertical-align: middle;
+    margin-right: 8px;
+    image-rendering: pixelated;
+}
+.hlp-welcome p { margin: 4px 0; }
+.hlp-welcome-btn {
+    margin-top: 16px;
+    padding: 8px 24px;
+    font-size: 12pt;
+    cursor: pointer;
+}
+
+.hlp-topics-item {
+    display: flex;
+    align-items: center;
+    padding: 1px 0;
+}
+.hlp-topics-icon {
+    margin-right: 4px;
+    flex-shrink: 0;
+    image-rendering: pixelated;
+}
+.hlp-topics-item a {
+    color: #008000;
+    text-decoration: none;
+}
+.hlp-topics-item a:visited { color: #999; }
+.hlp-topics-item a:hover { text-decoration: underline; }
+
+.hlp-index-filter-wrap {
+    display: flex;
+}
+.hlp-index-filter {
+    flex: 1;
+    padding: 4px;
+    font-family: inherit;
+    font-size: inherit;
+}
+.hlp-index-clear {
+    margin-left: 4px;
+    padding: 2px 8px;
+    font-family: inherit;
+    font-size: inherit;
+    cursor: pointer;
+}
+
+.hlp-dragover {
+    outline: 3px dashed #008000;
+    outline-offset: -3px;
+}
+
+#content img { image-rendering: pixelated; }
+
+#footer {
+    text-align: center;
+    padding: 8px;
+    color: #808080;
+    font-size: 9pt;
+}
+
+.hlp-image-placeholder {
+    display: inline-block;
+    background: #eee;
+    border: 1px solid #999;
+    padding: 2px 6px;
+    font-size: 8pt;
+    color: #666;
+}
+
+@media print {
+    body { background: #fff; }
+    #container { margin: 0; }
+    #sticky { position: static; }
+    #app, .hlp-header, .hlp-toolbar, #footer { display: none; }
+    .hlp-nsr { border: none; padding: 0 0 8px; }
+    #content { border: none; padding: 0; }
+    a { color: #000; text-decoration: none; }
+}
