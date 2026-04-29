@@ -164,6 +164,25 @@ int hlp_decode_bitmap(HlpFile* hlp, uint32_t bm_index,
                       const uint8_t** out_ptr, size_t* out_len);
 void hlp_get_last_image_size(uint16_t* out_w, uint16_t* out_h, uint8_t* out_type);
 
+/* Peek at a |bm{index} subfile and return its picture type byte
+   (5/6 = bitmap, 8 = metafile). Returns -1 if not found. */
+int hlp_peek_image_type(HlpFile* hlp, uint32_t bm_index);
+
+/* Decompress and return the raw WMF bytes for a |bm{index} subfile of
+   image type=8. *out_alloc is the malloc'd buffer that owns the bytes
+   (caller frees with free()); *out_data points into it (may equal
+   *out_alloc, or may be NULL when the WMF data was uncompressed and
+   *out_alloc is also NULL — in that case do not free). *out_len is the
+   decompressed size. Also updates the last-image-size globals. */
+int hlp_get_wmf_bytes(HlpFile* hlp, uint32_t bm_index,
+                      uint8_t** out_alloc, const uint8_t** out_data,
+                      size_t* out_len);
+
+/* Render a |bm{index} type=8 metafile to a WMF opcode stream consumed
+   by JS. On success, *out_ops is malloc'd (caller frees). */
+int hlp_decode_image_wmf(HlpFile* hlp, uint32_t bm_index,
+                         const uint8_t** out_ops, size_t* out_len);
+
 typedef struct {
     uint8_t kind;
     uint32_t hash;

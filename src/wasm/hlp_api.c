@@ -139,6 +139,17 @@ int32_t hlp_decode_image_png(uint32_t handle, uint32_t bm_index,
     return hlp_decode_bitmap(&g_hlp, bm_index, out_ptr, out_len);
 }
 
+EXPORT(hlp_decode_image_wmf)
+int32_t hlp_decode_image_wmf_export(uint32_t handle, uint32_t bm_index,
+                                    const uint8_t** out_ptr, size_t* out_len) {
+    return hlp_decode_image_wmf(&g_hlp, bm_index, out_ptr, out_len);
+}
+
+EXPORT(hlp_peek_image_type)
+int32_t hlp_peek_image_type_export(uint32_t handle, uint32_t bm_index) {
+    return hlp_peek_image_type(&g_hlp, bm_index);
+}
+
 EXPORT(hlp_search_keyword)
 int32_t hlp_search_keyword_export(uint32_t handle, int32_t use_alink,
                                   const char* keyword,

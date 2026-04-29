@@ -1,0 +1,37 @@
+#ifndef WMF_H
+#define WMF_H
+
+#include "hlp.h"
+
+/* Binary opcode stream emitted by wmf_parse(), consumed by JS.
+   Little-endian throughout. Coordinates are i16 (WMF native);
+   colors are u32 in 0x00BBGGRR (WMF native, GDI COLORREF).
+   Strings are length-prefixed UTF-8 (no NUL terminator). */
+
+#define WMF_OP_END               0x00
+#define WMF_OP_BOUNDS            0x01  /* i16 orgX, orgY, extX, extY */
+#define WMF_OP_SET_PEN           0x02  /* u16 style, u16 width, u32 color */
+#define WMF_OP_SET_BRUSH         0x03  /* u16 style, u32 color, u16 hatch */
+#define WMF_OP_SET_FONT          0x04  /* i16 height, u16 weight, u8 italic,
+                                          i16 angle_deci_deg, u8 charset,
+                                          u16 nlen, name (UTF-8) */
+#define WMF_OP_SET_TEXT_COLOR    0x05  /* u32 color */
+#define WMF_OP_SET_POLY_FILL_MODE 0x06 /* u8 mode (1=alt, 2=winding) */
+#define WMF_OP_POLYLINE          0x07  /* u16 n, [i16 x, i16 y]*n */
+#define WMF_OP_POLYGON           0x08  /* u16 n, [i16 x, i16 y]*n */
+#define WMF_OP_POLYPOLYGON       0x09  /* u16 nPolys, [u16 size]*n,
+                                          [i16 x, i16 y]*sum */
+#define WMF_OP_TEXT              0x0A  /* i16 x, i16 y, u16 nbytes, UTF-8 */
+#define WMF_OP_CLIP_SAVE         0x0B
+#define WMF_OP_CLIP_RESTORE      0x0C
+#define WMF_OP_CLIP_INTERSECT    0x0D  /* same payload as POLYPOLYGON */
+#define WMF_OP_DIB_BLIT          0x0E  /* i16 dx,dy,dw,dh; u16 w,h; rgba w*h*4 */
+#define WMF_OP_BIT_COPY          0x0F  /* i16 dx,dy,sx,sy,w,h */
+
+/* Parse a decompressed WMF buffer and emit an opcode stream.
+   On success, *out_ops points to a malloc'd buffer (caller frees) of
+   *out_len bytes. Returns 0 on success, -1 on error (sets hlp_set_error). */
+int wmf_parse(const uint8_t* data, size_t len,
+              uint8_t** out_ops, size_t* out_len);
+
+#endif

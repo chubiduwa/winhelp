@@ -35,7 +35,7 @@ ZIG_DIR := zig-sdk
 ZIG := $(ZIG_DIR)/zig
 
 # Build settings
-SRC := $(wildcard src/wasm/*.c) $(wildcard src/wasm/vendor/*.c)
+SRC := $(wildcard src/wasm/*.c) $(wildcard src/wasm/wmf/*.c) $(wildcard src/wasm/vendor/*.c)
 TTF := $(wildcard fonts/*.ttf)
 WOFF2 := $(patsubst fonts/%.ttf,fonts/woff2/%.woff2,$(TTF))
 DIST := dist

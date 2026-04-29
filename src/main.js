@@ -17,6 +17,60 @@
         console.log(decoder.decode(new Uint8Array(memory.buffer, ptr, len)));
     }
 
+    /* Dispatch a WMF opcode stream (emitted by wmf_parse in C) onto a 2D
+       canvas, then export as a PNG blob. Mirrors refs/wmf/render.js. */
+    const WMF_OP = Object.freeze({
+        END: 0x00, BOUNDS: 0x01,
+        SET_PEN: 0x02, SET_BRUSH: 0x03, SET_FONT: 0x04,
+        SET_TEXT_COLOR: 0x05, SET_POLY_FILL_MODE: 0x06,
+        POLYLINE: 0x07, POLYGON: 0x08, POLYPOLYGON: 0x09,
+        TEXT: 0x0A,
+        CLIP_SAVE: 0x0B, CLIP_RESTORE: 0x0C, CLIP_INTERSECT: 0x0D,
+        DIB_BLIT: 0x0E, BIT_COPY: 0x0F,
+    });
+
+    async function renderWmfToBlob(opsBytes) {
+        const dv = new DataView(opsBytes.buffer, opsBytes.byteOffset, opsBytes.byteLength);
+        let p = 0;
+        const rd_u8  = () => opsBytes[p++];
+        const rd_i16 = () => { const v = dv.getInt16(p, true);  p += 2; return v; };
+
+        /* The first opcode must be BOUNDS so we can size the canvas. */
+        if (opsBytes.length < 1 || rd_u8() !== WMF_OP.BOUNDS)
+            throw new Error('wmf: missing BOUNDS opcode');
+        const orgX = rd_i16(), orgY = rd_i16();
+        const extX = rd_i16(), extY = rd_i16();
+        const w = Math.abs(extX), h = Math.abs(extY);
+        if (!w || !h) throw new Error('wmf: zero extents');
+
+        const MAX_DIM = 512;
+        const scale = Math.min(1, MAX_DIM / Math.max(w, h));
+        const cw = Math.max(1, Math.round(w * scale));
+        const ch = Math.max(1, Math.round(h * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = cw;
+        canvas.height = ch;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+        ctx.scale(scale * (extX < 0 ? -1 : 1), scale * (extY < 0 ? -1 : 1));
+        ctx.translate(-orgX, -orgY);
+
+        /* Drawing dispatch arrives in later phases. For now we just walk
+           to END, ignoring unknown opcodes so the canvas renders blank. */
+        while (p < opsBytes.length) {
+            const op = rd_u8();
+            if (op === WMF_OP.END) break;
+            console.warn('wmf: unhandled opcode 0x' + op.toString(16));
+            break;
+        }
+
+        return new Promise((resolve, reject) => {
+            canvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')),
+                          'image/png');
+        });
+    }
+
     const { instance } = await WebAssembly.instantiateStreaming(
         fetch('hlp.wasm?v=' + Date.now()),
         { env: { memory, js_log: jsLog } }
@@ -316,43 +370,74 @@
                 const bmIndex = buf.getUint32(off, true); off += 4;
                 ensurePara();
 
-                const slotsPtr2 = wasm.malloc(8);
-                const rc2 = wasm.hlp_decode_image_png(currentHandle, bmIndex, slotsPtr2, slotsPtr2 + 4);
-                if (rc2 === 0) {
-                    const mem2 = new DataView(memory.buffer);
-                    const pngPtr = mem2.getUint32(slotsPtr2, true);
-                    const pngLen = mem2.getUint32(slotsPtr2 + 4, true);
-                    const pngData = new Uint8Array(memory.buffer, pngPtr, pngLen).slice();
-                    wasm.free(slotsPtr2);
+                const img = document.createElement('img');
+                img.style.verticalAlign = 'middle';
+                (currentSpan || currentPara).appendChild(img);
 
-                    const blob = new Blob([pngData], { type: 'image/png' });
-                    const img = document.createElement('img');
-                    img.src = URL.createObjectURL(blob);
-                    img.style.verticalAlign = 'middle';
-                    /* Set display size: bitmaps in pixels, metafiles in twips */
-                    const szPtr = wasm.malloc(6);
-                    wasm.hlp_get_last_image_size(szPtr, szPtr + 2, szPtr + 4);
-                    const szView = new DataView(memory.buffer);
-                    const dispW = szView.getUint16(szPtr, true);
-                    const dispH = szView.getUint16(szPtr + 2, true);
-                    const imgType = szView.getUint8(szPtr + 4);
-                    wasm.free(szPtr);
-                    img.dataset.debug = `IMAGE bm=${bmIndex} pos=${imgPos} type=${imgType} disp=${dispW}x${dispH} ${pngLen}bytes`;
-                    img.onload = () => { img.dataset.debug += ` actual=${img.naturalWidth}x${img.naturalHeight}`; };
-                    if (dispW && dispH && imgType !== 8) {
-                        img.width = dispW;
-                        img.height = dispH;
+                const peekType = wasm.hlp_peek_image_type(currentHandle, bmIndex);
+                if (peekType === 8) {
+                    const slotsPtr = wasm.malloc(8);
+                    const rc = wasm.hlp_decode_image_wmf(currentHandle, bmIndex, slotsPtr, slotsPtr + 4);
+                    if (rc === 0) {
+                        const mv = new DataView(memory.buffer);
+                        const opsPtr = mv.getUint32(slotsPtr, true);
+                        const opsLen = mv.getUint32(slotsPtr + 4, true);
+                        const opsBytes = new Uint8Array(memory.buffer, opsPtr, opsLen).slice();
+                        wasm.free(opsPtr);
+                        wasm.free(slotsPtr);
+                        img.dataset.debug = `IMAGE bm=${bmIndex} pos=${imgPos} type=8 wmfops=${opsLen}bytes`;
+                        renderWmfToBlob(opsBytes).then(blob => {
+                            img.src = URL.createObjectURL(blob);
+                            img.dataset.debug += ` png=${blob.size}bytes`;
+                        }).catch(e => {
+                            console.warn('wmf render bm' + bmIndex + ':', e);
+                            img.alt = `[wmf:${bmIndex}]`;
+                        });
+                    } else {
+                        const errPtr = wasm.hlp_get_error();
+                        const err = errPtr ? readCString(errPtr) : 'unknown';
+                        console.warn('wmf decode bm' + bmIndex + ':', err);
+                        wasm.free(slotsPtr);
+                        const ph = document.createElement('span');
+                        ph.textContent = `[wmf:${bmIndex}]`;
+                        ph.className = 'hlp-image-placeholder';
+                        img.replaceWith(ph);
                     }
-                    (currentSpan || currentPara).appendChild(img);
                 } else {
-                    const errPtr = wasm.hlp_get_error();
-                    const err = errPtr ? readCString(errPtr) : 'unknown';
-                    console.warn('Image decode failed, bm' + bmIndex + ':', err);
-                    wasm.free(slotsPtr2);
-                    const ph = document.createElement('span');
-                    ph.textContent = `[image:${bmIndex}]`;
-                    ph.className = 'hlp-image-placeholder';
-                    currentPara.appendChild(ph);
+                    const slotsPtr2 = wasm.malloc(8);
+                    const rc2 = wasm.hlp_decode_image_png(currentHandle, bmIndex, slotsPtr2, slotsPtr2 + 4);
+                    if (rc2 === 0) {
+                        const mem2 = new DataView(memory.buffer);
+                        const pngPtr = mem2.getUint32(slotsPtr2, true);
+                        const pngLen = mem2.getUint32(slotsPtr2 + 4, true);
+                        const pngData = new Uint8Array(memory.buffer, pngPtr, pngLen).slice();
+                        wasm.free(slotsPtr2);
+
+                        const blob = new Blob([pngData], { type: 'image/png' });
+                        img.src = URL.createObjectURL(blob);
+                        const szPtr = wasm.malloc(6);
+                        wasm.hlp_get_last_image_size(szPtr, szPtr + 2, szPtr + 4);
+                        const szView = new DataView(memory.buffer);
+                        const dispW = szView.getUint16(szPtr, true);
+                        const dispH = szView.getUint16(szPtr + 2, true);
+                        const imgType = szView.getUint8(szPtr + 4);
+                        wasm.free(szPtr);
+                        img.dataset.debug = `IMAGE bm=${bmIndex} pos=${imgPos} type=${imgType} disp=${dispW}x${dispH} ${pngLen}bytes`;
+                        img.onload = () => { img.dataset.debug += ` actual=${img.naturalWidth}x${img.naturalHeight}`; };
+                        if (dispW && dispH) {
+                            img.width = dispW;
+                            img.height = dispH;
+                        }
+                    } else {
+                        const errPtr = wasm.hlp_get_error();
+                        const err = errPtr ? readCString(errPtr) : 'unknown';
+                        console.warn('Image decode failed, bm' + bmIndex + ':', err);
+                        wasm.free(slotsPtr2);
+                        const ph = document.createElement('span');
+                        ph.textContent = `[image:${bmIndex}]`;
+                        ph.className = 'hlp-image-placeholder';
+                        img.replaceWith(ph);
+                    }
                 }
                 /* Don't reset currentSpan — font continues after image */
                 break;

@@ -1,4 +1,5 @@
 #include "hlp.h"
+#include "wmf/wmf.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
@@ -359,6 +360,87 @@ int hlp_decode_bitmap(HlpFile* hlp, uint32_t bm_index,
         hlp_set_error(err);
     }
     return -1;
+}
+
+/* Decompress and hand back the raw WMF byte stream for a type=8 |bm{n}.
+   *out_alloc owns memory (free with free()) unless the WMF data was
+   stored uncompressed, in which case *out_alloc is NULL. */
+int hlp_get_wmf_bytes(HlpFile* hlp, uint32_t bm_index,
+                      uint8_t** out_alloc, const uint8_t** out_data,
+                      size_t* out_len) {
+    char name[16];
+    snprintf(name, sizeof(name), "|bm%u", bm_index);
+
+    uint8_t *buf, *end;
+    if (hlp_find_subfile(hlp, name, &buf, &end) != 0) {
+        hlp_set_error("bitmap subfile not found");
+        return -1;
+    }
+
+    uint8_t* ref = buf + 9;
+    uint16_t numpict = get_u16(ref, 2);
+    if (numpict == 0) { hlp_set_error("no pictures"); return -1; }
+
+    const uint8_t* beg = ref + get_u32(ref, 4);
+    uint8_t type = beg[0];
+    uint8_t pack = beg[1];
+    const uint8_t* ptr = beg + 2;
+
+    if (type != 8) { hlp_set_error("not a metafile"); return -1; }
+
+    uint16_t mm = img_fetch_ushort(&ptr); /* mapping mode */
+    uint16_t mf_w = get_u16(ptr, 0);
+    uint16_t mf_h = get_u16(ptr, 2);
+    ptr += 4;
+    (void)mm;
+    g_last_img_w = mf_w;
+    g_last_img_h = mf_h;
+    g_last_img_type = 8;
+
+    uint32_t dsize = fetch_ulong(&ptr);
+    uint32_t csize = fetch_ulong(&ptr);
+    fetch_ulong(&ptr); /* hotspot size */
+    uint32_t data_off = get_u32(ptr, 0); ptr += 4;
+    ptr += 4; /* hotspot offset */
+
+    uint8_t* alloc = 0;
+    uint8_t* wmf = decompress_gfx(beg + data_off, csize, dsize, pack, &alloc);
+    if (!wmf) { hlp_set_error("WMF decompress failed"); return -1; }
+
+    *out_alloc = alloc;
+    *out_data = wmf;
+    *out_len = dsize;
+    return 0;
+}
+
+int hlp_peek_image_type(HlpFile* hlp, uint32_t bm_index) {
+    char name[16];
+    snprintf(name, sizeof(name), "|bm%u", bm_index);
+    uint8_t *buf, *end;
+    if (hlp_find_subfile(hlp, name, &buf, &end) != 0) return -1;
+    uint8_t* ref = buf + 9;
+    if (get_u16(ref, 2) == 0) return -1;
+    const uint8_t* beg = ref + get_u32(ref, 4);
+    return (int)beg[0];
+}
+
+int hlp_decode_image_wmf(HlpFile* hlp, uint32_t bm_index,
+                         const uint8_t** out_ops, size_t* out_len) {
+    uint8_t* alloc = 0;
+    const uint8_t* data = 0;
+    size_t data_len = 0;
+    if (hlp_get_wmf_bytes(hlp, bm_index, &alloc, &data, &data_len) != 0)
+        return -1;
+
+    uint8_t* ops = 0;
+    size_t ops_len = 0;
+    int rc = wmf_parse(data, data_len, &ops, &ops_len);
+    free(alloc);
+    if (rc != 0) return -1;
+
+    *out_ops = ops;
+    *out_len = ops_len;
+    return 0;
 }
 
 /*
