@@ -29,13 +29,22 @@
         DIB_BLIT: 0x0E, BIT_COPY: 0x0F,
     });
 
+    /* COLORREF (0x00BBGGRR) -> CSS #RRGGBB. */
+    function wmfColor(c) {
+        return '#' +
+            (c & 0xff).toString(16).padStart(2, '0') +
+            ((c >> 8) & 0xff).toString(16).padStart(2, '0') +
+            ((c >> 16) & 0xff).toString(16).padStart(2, '0');
+    }
+
     async function renderWmfToBlob(opsBytes) {
         const dv = new DataView(opsBytes.buffer, opsBytes.byteOffset, opsBytes.byteLength);
         let p = 0;
         const rd_u8  = () => opsBytes[p++];
+        const rd_u16 = () => { const v = dv.getUint16(p, true); p += 2; return v; };
         const rd_i16 = () => { const v = dv.getInt16(p, true);  p += 2; return v; };
+        const rd_u32 = () => { const v = dv.getUint32(p, true); p += 4; return v; };
 
-        /* The first opcode must be BOUNDS so we can size the canvas. */
         if (opsBytes.length < 1 || rd_u8() !== WMF_OP.BOUNDS)
             throw new Error('wmf: missing BOUNDS opcode');
         const orgX = rd_i16(), orgY = rd_i16();
@@ -56,13 +65,103 @@
         ctx.scale(scale * (extX < 0 ? -1 : 1), scale * (extY < 0 ? -1 : 1));
         ctx.translate(-orgX, -orgY);
 
-        /* Drawing dispatch arrives in later phases. For now we just walk
-           to END, ignoring unknown opcodes so the canvas renders blank. */
+        /* Snap a pen width up to the next integer device pixel so wider
+           pens stay visibly thicker than 1-unit cosmetic pens after
+           downscaling. lineWidth is in transformed coords so we divide
+           back by scale. (Matches refs/wmf/render.js.) */
+        const penWidth = (w) => {
+            if (!scale) return Math.max(w || 0, 1);
+            return Math.max(1, Math.ceil((w || 0) * scale)) / scale;
+        };
+
+        /* GDI semantics for current pen/brush/fill-mode. */
+        let pen = { style: 0, width: 1, color: 0x000000 };  /* default black 1px */
+        let brush = { style: 0, color: 0xFFFFFF, hatch: 0 }; /* default white solid */
+        let polyFillMode = 1; /* ALTERNATE / even-odd */
+
+        const tracePoly = (n, closed) => {
+            for (let i = 0; i < n; i++) {
+                const x = rd_i16(), y = rd_i16();
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            if (closed) ctx.closePath();
+        };
+
         while (p < opsBytes.length) {
             const op = rd_u8();
             if (op === WMF_OP.END) break;
-            console.warn('wmf: unhandled opcode 0x' + op.toString(16));
-            break;
+
+            switch (op) {
+            case WMF_OP.SET_PEN:
+                pen.style = rd_u16();
+                pen.width = rd_u16();
+                pen.color = rd_u32();
+                break;
+            case WMF_OP.SET_BRUSH:
+                brush.style = rd_u16();
+                brush.color = rd_u32();
+                brush.hatch = rd_u16();
+                break;
+            case WMF_OP.SET_POLY_FILL_MODE:
+                polyFillMode = rd_u8();
+                break;
+
+            case WMF_OP.POLYLINE: {
+                const n = rd_u16();
+                if (!n) break;
+                ctx.beginPath();
+                tracePoly(n, false);
+                ctx.strokeStyle = wmfColor(pen.color);
+                ctx.lineWidth = penWidth(pen.width);
+                if (pen.style !== 5) ctx.stroke();
+                break;
+            }
+            case WMF_OP.POLYGON: {
+                const n = rd_u16();
+                if (!n) break;
+                ctx.beginPath();
+                tracePoly(n, true);
+                ctx.strokeStyle = wmfColor(pen.color);
+                ctx.fillStyle   = wmfColor(brush.color);
+                ctx.lineWidth   = penWidth(pen.width);
+                /* Fill before stroke so the stroke paints on top of the
+                   fill (matches GDI; otherwise the fill covers the inner
+                   half of the stroke and outlines look too thin). */
+                if (brush.style !== 1) {
+                    ctx.fill(polyFillMode === 2 ? 'nonzero' : 'evenodd');
+                }
+                if (pen.style !== 5) ctx.stroke();
+                break;
+            }
+            case WMF_OP.POLYPOLYGON: {
+                const np = rd_u16();
+                if (!np) break;
+                const sizes = new Array(np);
+                for (let i = 0; i < np; i++) sizes[i] = rd_u16();
+                ctx.beginPath();
+                for (let i = 0; i < np; i++) tracePoly(sizes[i], true);
+                ctx.strokeStyle = wmfColor(pen.color);
+                ctx.fillStyle   = wmfColor(brush.color);
+                ctx.lineWidth   = penWidth(pen.width);
+                /* Sub-polygons fill as a single path under the current
+                   fill rule. With ALTERNATE (the WMF default) nested
+                   contours punch holes — clip-art draws thick outlines
+                   as one PolyPolygon and relies on this. */
+                if (brush.style !== 1) {
+                    ctx.fill(polyFillMode === 2 ? 'nonzero' : 'evenodd');
+                }
+                if (pen.style !== 5) ctx.stroke();
+                break;
+            }
+
+            default:
+                console.warn('wmf: unhandled opcode 0x' + op.toString(16));
+                /* Stop to avoid mis-reading subsequent bytes once we hit
+                   an opcode whose payload size we don't know. */
+                p = opsBytes.length;
+                break;
+            }
         }
 
         return new Promise((resolve, reject) => {
