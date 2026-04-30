@@ -35,11 +35,20 @@
 typedef enum { OBJ_NONE = 0, OBJ_PEN, OBJ_BRUSH, OBJ_FONT } ObjKind;
 
 typedef struct {
+    int16_t  height;
+    uint16_t weight;
+    uint8_t  italic;
+    int16_t  angle_decideg; /* WMF Escapement, tenths of a degree */
+    uint8_t  charset;
+    char     name[33];      /* NUL-terminated facename (≤32 bytes) */
+} WmfFont;
+
+typedef struct {
     ObjKind kind;
     union {
         struct { uint16_t style, width; uint32_t color; } pen;
         struct { uint16_t style; uint32_t color; uint16_t hatch; } brush;
-        struct { /* phase 3 fills this */ uint8_t _pad; } font;
+        WmfFont font;
     } u;
 } WmfObj;
 
@@ -62,6 +71,12 @@ typedef struct {
     uint16_t brush_style;
     uint32_t brush_color;
     uint16_t brush_hatch;
+    /* selected font */
+    uint8_t  has_font;
+    WmfFont  font;
+    /* text color */
+    uint8_t  has_text_color;
+    uint32_t text_color;
     /* polygon fill mode (1=ALTERNATE, 2=WINDING; 0 means unset) */
     uint8_t  poly_fill_mode;
     /* viewport */
@@ -119,6 +134,18 @@ static void buf_patch_i16(Buf* b, size_t off, int16_t v) {
     b->data[off + 1] = (uint8_t)((uint16_t)v >> 8);
 }
 
+static void buf_patch_u16(Buf* b, size_t off, uint16_t v) {
+    if (off + 2 > b->len) return;
+    b->data[off]     = (uint8_t)v;
+    b->data[off + 1] = (uint8_t)(v >> 8);
+}
+
+static void buf_bytes(Buf* b, const uint8_t* src, size_t n) {
+    buf_reserve(b, n); if (b->oom) return;
+    memcpy(b->data + b->len, src, n);
+    b->len += n;
+}
+
 /* ---------- coalescing state-change emission ------------------------ */
 
 typedef struct {
@@ -130,6 +157,12 @@ typedef struct {
     uint16_t brush_style;
     uint32_t brush_color;
     uint16_t brush_hatch;
+
+    int      font_valid;
+    WmfFont  font;
+
+    int      text_color_valid;
+    uint32_t text_color;
 
     uint8_t  pfm; /* last emitted poly_fill_mode (0 = never emitted) */
 } Emitted;
@@ -172,6 +205,41 @@ static void emit_pfm_if_changed(Buf* b, State* st, Emitted* em) {
     buf_u8(b, WMF_OP_SET_POLY_FILL_MODE);
     buf_u8(b, st->poly_fill_mode);
     em->pfm = st->poly_fill_mode;
+}
+
+static int font_eq(const WmfFont* a, const WmfFont* b) {
+    if (a->height != b->height) return 0;
+    if (a->weight != b->weight) return 0;
+    if (a->italic != b->italic) return 0;
+    if (a->angle_decideg != b->angle_decideg) return 0;
+    if (a->charset != b->charset) return 0;
+    return strcmp(a->name, b->name) == 0;
+}
+
+static void emit_font_if_changed(Buf* b, State* st, Emitted* em) {
+    if (!st->has_font) return;
+    if (em->font_valid && font_eq(&em->font, &st->font)) return;
+    buf_u8(b, WMF_OP_SET_FONT);
+    buf_i16(b, st->font.height);
+    buf_u16(b, st->font.weight);
+    buf_u8(b, st->font.italic);
+    buf_i16(b, st->font.angle_decideg);
+    buf_u8(b, st->font.charset);
+    size_t nlen = strlen(st->font.name);
+    if (nlen > 32) nlen = 32;
+    buf_u16(b, (uint16_t)nlen);
+    buf_bytes(b, (const uint8_t*)st->font.name, nlen);
+    em->font_valid = 1;
+    em->font = st->font;
+}
+
+static void emit_text_color_if_changed(Buf* b, State* st, Emitted* em) {
+    if (!st->has_text_color) return;
+    if (em->text_color_valid && em->text_color == st->text_color) return;
+    buf_u8(b, WMF_OP_SET_TEXT_COLOR);
+    buf_u32(b, st->text_color);
+    em->text_color_valid = 1;
+    em->text_color = st->text_color;
 }
 
 /* ---------- public API ---------------------------------------------- */
@@ -273,9 +341,26 @@ int wmf_parse(const uint8_t* data, size_t len,
             break;
         }
         case META_CREATEFONTINDIRECT: {
-            /* phase 3 will fill in font fields; reserve a slot for now */
+            /* MS-WMF 2.2.1.2 Font: 18 bytes of fixed fields + 32-byte facename. */
+            if (parm_len < 18) break;
             WmfObj o = {0};
             o.kind = OBJ_FONT;
+            o.u.font.height        = get_i16(parm, 0);
+            /* offset 2: Width    (unused by GDI fillText) */
+            o.u.font.angle_decideg = get_i16(parm, 4); /* Escapement */
+            /* offset 6: Orientation (mostly tracks Escapement) */
+            o.u.font.weight        = get_u16(parm, 8);
+            o.u.font.italic        = parm[10];
+            /* offset 11: Underline, 12: StrikeOut */
+            o.u.font.charset       = parm[13];
+            /* offset 14-17: OutPrecision/ClipPrecision/Quality/PitchAndFamily */
+            size_t name_max = parm_len > 18 ? parm_len - 18 : 0;
+            if (name_max > 32) name_max = 32;
+            size_t i;
+            for (i = 0; i < name_max && parm[18 + i]; i++) {
+                o.u.font.name[i] = (char)parm[18 + i];
+            }
+            o.u.font.name[i] = 0;
             obj_add(objects, &objects_count, WMF_OBJ_MAX, &o);
             break;
         }
@@ -301,7 +386,8 @@ int wmf_parse(const uint8_t* data, size_t len,
                 state.brush_color  = o->u.brush.color;
                 state.brush_hatch  = o->u.brush.hatch;
             } else if (o->kind == OBJ_FONT) {
-                /* phase 3 */
+                state.has_font = 1;
+                state.font = o->u.font;
             }
             break;
         }
@@ -371,16 +457,44 @@ int wmf_parse(const uint8_t* data, size_t len,
             break;
         }
 
-        /* Phase 2 ignores the rest; later phases will plug them in. */
+        case META_SETTEXTCOLOR:
+            if (parm_len >= 4) {
+                state.text_color = get_u32(parm, 0);
+                state.has_text_color = 1;
+            }
+            break;
+
+        case META_EXTTEXTOUT: {
+            /* MS-WMF 2.3.3.5: Y, X, StringLength, fwOpts, [Rectangle (8B)
+               if fwOpts & 0x06], String, [Dx]. */
+            if (parm_len < 8) break;
+            int16_t y = get_i16(parm, 0);
+            int16_t x = get_i16(parm, 2);
+            uint16_t slen = get_u16(parm, 4);
+            uint16_t opts = get_u16(parm, 6);
+            size_t soff = 8;
+            if (opts & 0x06) soff += 8;
+            if (parm_len < soff + slen) break;
+
+            emit_font_if_changed(&b, &state, &em);
+            emit_text_color_if_changed(&b, &state, &em);
+
+            buf_u8(&b, WMF_OP_TEXT);
+            buf_i16(&b, x);
+            buf_i16(&b, y);
+            buf_u16(&b, slen);
+            buf_bytes(&b, parm + soff, slen);
+            break;
+        }
+
+        /* Records ignored in phase 3; later phases will plug in. */
         case META_SETBKMODE:
         case META_SETMAPMODE:
         case META_SETSTRETCHBLTMODE:
         case META_SETTEXTALIGN:
-        case META_SETTEXTCOLOR:
         case META_INTERSECTCLIPRECT:
         case META_SELECTCLIPREGION:
         case META_ESCAPE:
-        case META_EXTTEXTOUT:
         case META_DIBBITBLT:
         case META_DIBSTRETCHBLT:
         default:

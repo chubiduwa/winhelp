@@ -37,6 +37,38 @@
             ((c >> 16) & 0xff).toString(16).padStart(2, '0');
     }
 
+    /* Map a Windows GDI CharSet byte to a TextDecoder encoding label.
+       Browsers natively support the SBCS windows-12xx pages and the DBCS
+       legacy encodings (shift-jis, gbk, euc-kr, big5), so we don't need
+       any conversion tables in C. */
+    function wmfCharsetLabel(cs) {
+        switch (cs) {
+            case 128: return 'shift-jis';      /* SHIFTJIS */
+            case 129: return 'euc-kr';         /* HANGUL — covers CP949 */
+            case 134: return 'gbk';            /* GB2312 */
+            case 136: return 'big5';           /* CHINESEBIG5 */
+            case 161: return 'windows-1253';   /* GREEK */
+            case 162: return 'windows-1254';   /* TURKISH */
+            case 163: return 'windows-1258';   /* VIETNAMESE */
+            case 177: return 'windows-1255';   /* HEBREW */
+            case 178: return 'windows-1256';   /* ARABIC */
+            case 186: return 'windows-1257';   /* BALTIC */
+            case 204: return 'windows-1251';   /* RUSSIAN */
+            case 222: return 'windows-874';    /* THAI */
+            case 238: return 'windows-1250';   /* EASTEUROPE */
+            default:  return 'windows-1252';   /* ANSI / DEFAULT / SYMBOL / OEM */
+        }
+    }
+    const wmfDecoders = new Map();
+    function wmfDecoder(cs) {
+        let d = wmfDecoders.get(cs);
+        if (d) return d;
+        try { d = new TextDecoder(wmfCharsetLabel(cs), { fatal: false }); }
+        catch (e) { d = new TextDecoder('windows-1252', { fatal: false }); }
+        wmfDecoders.set(cs, d);
+        return d;
+    }
+
     async function renderWmfToBlob(opsBytes) {
         const dv = new DataView(opsBytes.buffer, opsBytes.byteOffset, opsBytes.byteLength);
         let p = 0;
@@ -74,10 +106,13 @@
             return Math.max(1, Math.ceil((w || 0) * scale)) / scale;
         };
 
-        /* GDI semantics for current pen/brush/fill-mode. */
+        /* GDI semantics for current pen/brush/fill-mode/font/text-color. */
         let pen = { style: 0, width: 1, color: 0x000000 };  /* default black 1px */
         let brush = { style: 0, color: 0xFFFFFF, hatch: 0 }; /* default white solid */
         let polyFillMode = 1; /* ALTERNATE / even-odd */
+        let textColor = 0x000000;
+        let fontAngleDeg = 0; /* tenths-of-degree → degrees applied at TEXT */
+        let fontCharset = 0;
 
         const tracePoly = (n, closed) => {
             for (let i = 0; i < n; i++) {
@@ -106,6 +141,50 @@
             case WMF_OP.SET_POLY_FILL_MODE:
                 polyFillMode = rd_u8();
                 break;
+
+            case WMF_OP.SET_FONT: {
+                const height  = rd_i16();
+                const weight  = rd_u16();
+                const italic  = rd_u8();
+                const angle   = rd_i16(); /* tenths of a degree */
+                const charset = rd_u8();
+                const nlen    = rd_u16();
+                const name    = wmfDecoder(charset).decode(opsBytes.subarray(p, p + nlen));
+                p += nlen;
+                let s = '';
+                if (italic) s += 'italic ';
+                if (weight === 700) s += 'bold ';
+                else if (weight && weight !== 400) s += weight + ' ';
+                const px = Math.abs(height);
+                if (px) s += px + 'px ';
+                let face = name;
+                if (face === 'System') face = 'Calibri';
+                s += face ? `'${face}', sans-serif` : 'sans-serif';
+                ctx.font = s.trim();
+                fontAngleDeg = angle / 10;
+                fontCharset = charset;
+                break;
+            }
+            case WMF_OP.SET_TEXT_COLOR:
+                textColor = rd_u32();
+                break;
+            case WMF_OP.TEXT: {
+                const x = rd_i16(), y = rd_i16();
+                const nlen = rd_u16();
+                const text = wmfDecoder(fontCharset).decode(opsBytes.subarray(p, p + nlen));
+                p += nlen;
+                ctx.fillStyle = wmfColor(textColor);
+                if (fontAngleDeg) {
+                    ctx.save();
+                    ctx.translate(x, y);
+                    ctx.rotate(-fontAngleDeg * Math.PI / 180);
+                    ctx.fillText(text, 0, 0);
+                    ctx.restore();
+                } else {
+                    ctx.fillText(text, x, y);
+                }
+                break;
+            }
 
             case WMF_OP.POLYLINE: {
                 const n = rd_u16();
