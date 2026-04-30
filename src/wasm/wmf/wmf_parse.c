@@ -3,6 +3,10 @@
 /* MS-WMF record types we recognize. */
 #define META_EOF                  0x0000
 #define META_SAVEDC               0x001E
+#define META_CREATEPALETTE        0x00F7
+#define META_DIBCREATEPATTERNBRUSH 0x0142
+#define META_CREATEPATTERNBRUSH   0x01F9
+#define META_CREATEREGION         0x06FF
 #define META_SETBKMODE            0x0102
 #define META_SETMAPMODE           0x0103
 #define META_SETPOLYFILLMODE      0x0106
@@ -41,11 +45,21 @@
 #define CLIP_MODE_EXCLUDE   3
 
 #define WMF_STACK_MAX 32
-#define WMF_OBJ_MAX   256
+/* MS-WMF NumberOfObjects is u16, so 65535 is the spec ceiling. We cap
+   our allocation here as a sanity bound for malformed inputs; real
+   files top out in the low thousands. */
+#define WMF_OBJ_MAX   65535
 
 /* ---------- object table -------------------------------------------- */
 
-typedef enum { OBJ_NONE = 0, OBJ_PEN, OBJ_BRUSH, OBJ_FONT } ObjKind;
+/* OBJ_OTHER is for records like META_CREATEPALETTE / CREATEREGION /
+   CREATEPATTERNBRUSH / DIBCREATEPATTERNBRUSH that consume an object
+   table slot but don't carry pen/brush/font state we model. We must
+   reserve their slots so subsequent SELECTOBJECT indices line up;
+   js-wmf misses this and mis-routes selections (visible e.g. in
+   STAR13.WMF, where the palette at index 0 shifts every later object,
+   producing a black square instead of a blue star). */
+typedef enum { OBJ_NONE = 0, OBJ_PEN, OBJ_BRUSH, OBJ_FONT, OBJ_OTHER } ObjKind;
 
 typedef struct {
     int16_t  height;
@@ -246,6 +260,30 @@ static void emit_font_if_changed(Buf* b, State* st, Emitted* em) {
     em->font = st->font;
 }
 
+/* Lock the BOUNDS payload on the first drawing opcode whose state has
+   both SetWindowOrg and SetWindowExt seen. Mirrors render.js, which
+   iterates emitted actions and breaks on the first one whose snapshot
+   has both `Extent` and `Origin` — picking up later values when the
+   WMF re-set the window before drawing. Locking on the *first record*
+   instead caused us to capture stub (1,1) extents for clip-art that
+   sets up a tiny initial window before declaring its real one. */
+static void try_lock_bounds(Buf* b, size_t bounds_off, const State* st,
+                            int ext_seen, int org_seen, int* locked,
+                            int16_t* last_org_x, int16_t* last_org_y,
+                            int16_t* last_ext_x, int16_t* last_ext_y) {
+    if (*locked) return;
+    if (!ext_seen || !org_seen) return;
+    buf_patch_i16(b, bounds_off + 0, st->win_org_x);
+    buf_patch_i16(b, bounds_off + 2, st->win_org_y);
+    buf_patch_i16(b, bounds_off + 4, st->win_ext_x);
+    buf_patch_i16(b, bounds_off + 6, st->win_ext_y);
+    *locked = 1;
+    *last_org_x = st->win_org_x;
+    *last_org_y = st->win_org_y;
+    *last_ext_x = st->win_ext_x;
+    *last_ext_y = st->win_ext_y;
+}
+
 static void emit_text_color_if_changed(Buf* b, State* st, Emitted* em) {
     if (!st->has_text_color) return;
     if (em->text_color_valid && em->text_color == st->text_color) return;
@@ -315,15 +353,28 @@ int wmf_parse(const uint8_t* data, size_t len,
     Buf b; buf_init(&b);
     if (b.oom) { hlp_set_error("WMF: oom"); return -1; }
 
-    /* BOUNDS placeholder — payload patched as SetWindowOrg/Ext are seen. */
+    /* BOUNDS placeholder — payload patched on the first drawing opcode
+       once both SetWindowOrg and SetWindowExt have been observed.
+       Falls back to "last ext seen" with origin (0,0) at end-of-stream
+       if no drawing op ever locks them. */
     buf_u8(&b, WMF_OP_BOUNDS);
     size_t bounds_off = b.len;
     buf_i16(&b, 0); buf_i16(&b, 0); buf_i16(&b, 0); buf_i16(&b, 0);
-    int org_locked = 0, ext_locked = 0;
+    int bounds_locked = 0;
+    int ext_seen = 0, org_seen = 0;
+    /* Track the last (org, ext) we exposed to the dispatcher (initially
+       through BOUNDS, later through SET_WINDOW) so we don't re-emit
+       redundant transforms when a WMF re-states the same window. */
+    int16_t last_emitted_org_x = 0, last_emitted_org_y = 0;
+    int16_t last_emitted_ext_x = 0, last_emitted_ext_y = 0;
 
-    WmfObj objects[WMF_OBJ_MAX];
-    for (int i = 0; i < WMF_OBJ_MAX; i++) objects[i].kind = OBJ_NONE;
-    int objects_count = num_objects;
+    /* Heap-allocate the object table sized to the header — the stack
+       isn't viable here (Buttrfly6.wmf in the test corpus declares 462
+       objects, and well-formed files can go up to 65535). */
+    size_t obj_cap = num_objects > 0 ? num_objects : 1;
+    WmfObj* objects = (WmfObj*)calloc(obj_cap, sizeof(WmfObj));
+    if (!objects) { free(b.data); hlp_set_error("WMF: oom"); return -1; }
+    int objects_count = (int)num_objects;
 
     State state; memset(&state, 0, sizeof(state));
     State stack[WMF_STACK_MAX];
@@ -360,27 +411,42 @@ int wmf_parse(const uint8_t* data, size_t len,
         size_t parm_len = rsize - 6;
 
         switch (rfunc) {
-        case META_SETWINDOWORG: {
-            if (parm_len < 4) break;
-            int16_t y = get_i16(parm, 0);
-            int16_t x = get_i16(parm, 2);
-            state.win_org_x = x; state.win_org_y = y;
-            if (!org_locked) {
-                buf_patch_i16(&b, bounds_off + 0, x);
-                buf_patch_i16(&b, bounds_off + 2, y);
-                org_locked = 1;
-            }
-            break;
-        }
+        case META_SETWINDOWORG:
         case META_SETWINDOWEXT: {
             if (parm_len < 4) break;
-            int16_t y = get_i16(parm, 0);
-            int16_t x = get_i16(parm, 2);
-            state.win_ext_x = x; state.win_ext_y = y;
-            if (!ext_locked) {
-                buf_patch_i16(&b, bounds_off + 4, x);
-                buf_patch_i16(&b, bounds_off + 6, y);
-                ext_locked = 1;
+            if (rfunc == META_SETWINDOWORG) {
+                state.win_org_y = get_i16(parm, 0);
+                state.win_org_x = get_i16(parm, 2);
+                org_seen = 1;
+            } else {
+                state.win_ext_y = get_i16(parm, 0);
+                state.win_ext_x = get_i16(parm, 2);
+                ext_seen = 1;
+            }
+            /* After BOUNDS is locked, mid-stream window changes update
+               the dispatcher's transform via SET_WINDOW so files that
+               draw inside a SaveDC + new window + RestoreDC bracket
+               (e.g. STAR13.WMF) render correctly. Real GDI re-maps
+               logical→device on every SetWindow; render.js doesn't, so
+               we knowingly diverge from those baselines. To stay
+               pixel-identical when the window is just being re-stated
+               (very common — many WMFs repeat the initial values), we
+               only emit when the values actually differ from the
+               last-emitted set. */
+            if (bounds_locked &&
+                (state.win_org_x != last_emitted_org_x ||
+                 state.win_org_y != last_emitted_org_y ||
+                 state.win_ext_x != last_emitted_ext_x ||
+                 state.win_ext_y != last_emitted_ext_y)) {
+                buf_u8(&b, WMF_OP_SET_WINDOW);
+                buf_i16(&b, state.win_org_x);
+                buf_i16(&b, state.win_org_y);
+                buf_i16(&b, state.win_ext_x);
+                buf_i16(&b, state.win_ext_y);
+                last_emitted_org_x = state.win_org_x;
+                last_emitted_org_y = state.win_org_y;
+                last_emitted_ext_x = state.win_ext_x;
+                last_emitted_ext_y = state.win_ext_y;
             }
             break;
         }
@@ -398,7 +464,7 @@ int wmf_parse(const uint8_t* data, size_t len,
                matching js-wmf's `data.read_shift(4) & 0xFF`. */
             o.u.pen.width = (uint16_t)(get_u32(parm, 2) & 0xFF);
             o.u.pen.color = get_u32(parm, 6);
-            obj_add(objects, &objects_count, WMF_OBJ_MAX, &o);
+            obj_add(objects, &objects_count, (int)obj_cap, &o);
             break;
         }
         case META_CREATEBRUSHINDIRECT: {
@@ -408,7 +474,7 @@ int wmf_parse(const uint8_t* data, size_t len,
             o.u.brush.style = get_u16(parm, 0);
             o.u.brush.color = get_u32(parm, 2);
             o.u.brush.hatch = get_u16(parm, 6);
-            obj_add(objects, &objects_count, WMF_OBJ_MAX, &o);
+            obj_add(objects, &objects_count, (int)obj_cap, &o);
             break;
         }
         case META_CREATEFONTINDIRECT: {
@@ -432,13 +498,25 @@ int wmf_parse(const uint8_t* data, size_t len,
                 o.u.font.name[i] = (char)parm[18 + i];
             }
             o.u.font.name[i] = 0;
-            obj_add(objects, &objects_count, WMF_OBJ_MAX, &o);
+            obj_add(objects, &objects_count, (int)obj_cap, &o);
             break;
         }
         case META_DELETEOBJECT: {
             if (parm_len < 2) break;
             uint16_t idx = get_u16(parm, 0);
             if (idx < (uint16_t)objects_count) objects[idx].kind = OBJ_NONE;
+            break;
+        }
+        case META_CREATEPALETTE:
+        case META_CREATEPATTERNBRUSH:
+        case META_DIBCREATEPATTERNBRUSH:
+        case META_CREATEREGION: {
+            /* Consume an object slot so later SELECTOBJECT indices line
+               up. We don't render through these objects, so the slot
+               just holds an OBJ_OTHER placeholder. */
+            WmfObj o = {0};
+            o.kind = OBJ_OTHER;
+            obj_add(objects, &objects_count, (int)obj_cap, &o);
             break;
         }
         case META_SELECTOBJECT: {
@@ -465,6 +543,10 @@ int wmf_parse(const uint8_t* data, size_t len,
 
         case META_SAVEDC:
             if (stack_top + 1 < WMF_STACK_MAX) stack[++stack_top] = state;
+            /* Mirror canvas state via the dispatcher's save stack so
+               ctx.save() preserves the transform across mid-stream
+               SetWindow changes that show up between SAVEDC/RESTOREDC. */
+            buf_u8(&b, WMF_OP_CLIP_SAVE);
             break;
         case META_RESTOREDC: {
             if (parm_len < 2) break;
@@ -474,6 +556,7 @@ int wmf_parse(const uint8_t* data, size_t len,
                 state = stack[idx];
                 stack_top = idx - 1;
             }
+            buf_u8(&b, WMF_OP_CLIP_RESTORE);
             break;
         }
 
@@ -490,6 +573,7 @@ int wmf_parse(const uint8_t* data, size_t len,
                 path_npoly++;
                 break;
             }
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
             emit_pen_if_changed(&b, &state, &em);
             if (rfunc == META_POLYGON) {
                 emit_brush_if_changed(&b, &state, &em);
@@ -522,6 +606,7 @@ int wmf_parse(const uint8_t* data, size_t len,
                 }
                 break;
             }
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
             emit_pen_if_changed(&b, &state, &em);
             emit_brush_if_changed(&b, &state, &em);
             emit_pfm_if_changed(&b, &state, &em);
@@ -551,6 +636,7 @@ int wmf_parse(const uint8_t* data, size_t len,
             if (opts & 0x06) soff += 8;
             if (parm_len < soff + slen) break;
 
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
             emit_font_if_changed(&b, &state, &em);
             emit_text_color_if_changed(&b, &state, &em);
 
@@ -587,10 +673,12 @@ int wmf_parse(const uint8_t* data, size_t len,
                 if (esc_parm_len < 4) break;
                 uint16_t mode = (uint16_t)(get_u32(esc_parm, 0) & 0xFFFF);
                 if (mode == CLIP_MODE_SAVE) {
+                    try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
                     buf_u8(&b, WMF_OP_CLIP_SAVE);
                 } else if (mode == CLIP_MODE_RESTORE) {
                     buf_u8(&b, WMF_OP_CLIP_RESTORE);
                 } else if (mode == CLIP_MODE_INTERSECT && path_npoly > 0) {
+                    try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
                     emit_pfm_if_changed(&b, &state, &em);
                     buf_u8(&b, WMF_OP_CLIP_INTERSECT);
                     buf_u16(&b, path_npoly);
@@ -641,6 +729,7 @@ int wmf_parse(const uint8_t* data, size_t len,
             int16_t y_dst  = get_i16(parm, off2 + 4);
             int16_t x_dst  = get_i16(parm, off2 + 6);
 
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
             if (has_bitmap) {
                 size_t dib_off = off2 + 8;
                 if (parm_len <= dib_off) break;
@@ -670,6 +759,7 @@ int wmf_parse(const uint8_t* data, size_t len,
             int16_t y_dst = get_i16(parm, off2 + 4);
             int16_t x_dst = get_i16(parm, off2 + 6);
 
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
             if (has_bitmap) {
                 size_t dib_off = off2 + 8;
                 if (parm_len <= dib_off) break;
@@ -693,6 +783,7 @@ int wmf_parse(const uint8_t* data, size_t len,
             int16_t y_dst = get_i16(parm, 18);
             int16_t x_dst = get_i16(parm, 20);
             if (parm_len <= 22) break;
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
             emit_dib_blit(&b, parm + 22, parm_len - 22,
                           x_dst, y_dst, dst_w, dst_h);
             break;
@@ -713,8 +804,19 @@ int wmf_parse(const uint8_t* data, size_t len,
         off += rsize;
     }
 
+    /* If no drawing opcode ever locked BOUNDS — e.g. an empty WMF or
+       a state-only file — fall back to the last-seen extent (or 0)
+       with origin (0,0). Matches render.js's image_size fallback. */
+    if (!bounds_locked && ext_seen) {
+        buf_patch_i16(&b, bounds_off + 0, 0);
+        buf_patch_i16(&b, bounds_off + 2, 0);
+        buf_patch_i16(&b, bounds_off + 4, state.win_ext_x);
+        buf_patch_i16(&b, bounds_off + 6, state.win_ext_y);
+    }
+
     buf_u8(&b, WMF_OP_END);
 
+    free(objects);
     free(path_sizes.data);
     free(path_points.data);
 

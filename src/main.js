@@ -27,6 +27,7 @@
         TEXT: 0x0A,
         CLIP_SAVE: 0x0B, CLIP_RESTORE: 0x0C, CLIP_INTERSECT: 0x0D,
         DIB_BLIT: 0x0E, BIT_COPY: 0x0F,
+        SET_WINDOW: 0x10,
     });
 
     /* COLORREF (0x00BBGGRR) -> CSS #RRGGBB. */
@@ -94,8 +95,23 @@
         canvas.height = ch;
         const ctx = canvas.getContext('2d');
         ctx.imageSmoothingEnabled = false;
+        /* Initial transform mirrors refs/wmf/render.js exactly so files
+           that don't change the window mid-stream stay pixel-identical
+           to the baselines (scale*sign, then translate; round() inside
+           cw/ch alone would drift one pixel on many files). */
         ctx.scale(scale * (extX < 0 ? -1 : 1), scale * (extY < 0 ? -1 : 1));
         ctx.translate(-orgX, -orgY);
+
+        /* SET_WINDOW (mid-stream SetWindowOrg/Ext changes) maps a new
+           logical window into the same device pixels (cw, ch) — by
+           definition not the original window, so we use cw/ch directly. */
+        const applyWindow = (oX, oY, eX, eY) => {
+            if (!eX || !eY) return;
+            const sx = cw / Math.abs(eX) * (eX < 0 ? -1 : 1);
+            const sy = ch / Math.abs(eY) * (eY < 0 ? -1 : 1);
+            ctx.setTransform(sx, 0, 0, sy, 0, 0);
+            ctx.translate(-oX, -oY);
+        };
 
         /* Snap a pen width up to the next integer device pixel so wider
            pens stay visibly thicker than 1-unit cosmetic pens after
@@ -106,9 +122,15 @@
             return Math.max(1, Math.ceil((w || 0) * scale)) / scale;
         };
 
-        /* GDI semantics for current pen/brush/fill-mode/font/text-color. */
-        let pen = { style: 0, width: 1, color: 0x000000 };  /* default black 1px */
-        let brush = { style: 0, color: 0xFFFFFF, hatch: 0 }; /* default white solid */
+        /* Track GDI pen/brush/fill-mode/font/text-color. Initial colors
+           match Canvas2D's default fillStyle/strokeStyle ("#000000")
+           so that WMFs which draw before any SelectObject reproduce
+           render.js's behavior — render.js leaves fillStyle/strokeStyle
+           untouched when state.Brush.Color / state.Pen.Color are
+           undefined, leaving the canvas defaults in place. (Real GDI's
+           default is the WHITE_BRUSH; render.js doesn't model that.) */
+        let pen = { style: 0, width: 1, color: 0x000000 };
+        let brush = { style: 0, color: 0x000000, hatch: 0 };
         let polyFillMode = 1; /* ALTERNATE / even-odd */
         let textColor = 0x000000;
         let fontAngleDeg = 0; /* tenths-of-degree → degrees applied at TEXT */
@@ -269,6 +291,12 @@
                     ctx.drawImage(off, 0, 0, Math.abs(dw) || w, Math.abs(dh) || h);
                     ctx.restore();
                 }
+                break;
+            }
+            case WMF_OP.SET_WINDOW: {
+                const oX = rd_i16(), oY = rd_i16();
+                const eX = rd_i16(), eY = rd_i16();
+                applyWindow(oX, oY, eX, eY);
                 break;
             }
             case WMF_OP.BIT_COPY: {

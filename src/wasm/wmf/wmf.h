@@ -30,6 +30,9 @@
 #define WMF_OP_CLIP_INTERSECT    0x0D  /* same payload as POLYPOLYGON */
 #define WMF_OP_DIB_BLIT          0x0E  /* i16 dx,dy,dw,dh; u16 w,h; rgba w*h*4 */
 #define WMF_OP_BIT_COPY          0x0F  /* i16 dx,dy,sx,sy,w,h */
+#define WMF_OP_SET_WINDOW        0x10  /* i16 orgX, orgY, extX, extY —
+                                          mid-stream SetWindowOrg/Ext
+                                          after BOUNDS has been locked. */
 
 /* Parse a decompressed WMF buffer and emit an opcode stream.
    On success, *out_ops points to a malloc'd buffer (caller frees) of

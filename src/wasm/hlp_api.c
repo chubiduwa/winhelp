@@ -150,6 +150,16 @@ int32_t hlp_peek_image_type_export(uint32_t handle, uint32_t bm_index) {
     return hlp_peek_image_type(&g_hlp, bm_index);
 }
 
+/* Test-harness entry point: parse raw WMF bytes from a buffer and
+   return the opcode stream. Same return convention as
+   hlp_decode_image_wmf (caller frees *out_ptr). */
+EXPORT(wmf_parse_buffer)
+int32_t wmf_parse_buffer_export(const uint8_t* data, size_t len,
+                                const uint8_t** out_ptr, size_t* out_len) {
+    extern int wmf_parse(const uint8_t*, size_t, uint8_t**, size_t*);
+    return wmf_parse(data, len, (uint8_t**)out_ptr, out_len);
+}
+
 EXPORT(hlp_search_keyword)
 int32_t hlp_search_keyword_export(uint32_t handle, int32_t use_alink,
                                   const char* keyword,
