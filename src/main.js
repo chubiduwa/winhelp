@@ -234,6 +234,18 @@
                 break;
             }
 
+            case WMF_OP.CLIP_SAVE:    ctx.save();    break;
+            case WMF_OP.CLIP_RESTORE: ctx.restore(); break;
+            case WMF_OP.CLIP_INTERSECT: {
+                const np = rd_u16();
+                const sizes = new Array(np);
+                for (let i = 0; i < np; i++) sizes[i] = rd_u16();
+                ctx.beginPath();
+                for (let i = 0; i < np; i++) tracePoly(sizes[i], true);
+                ctx.clip(polyFillMode === 2 ? 'nonzero' : 'evenodd');
+                break;
+            }
+
             default:
                 console.warn('wmf: unhandled opcode 0x' + op.toString(16));
                 /* Stop to avoid mis-reading subsequent bytes once we hit

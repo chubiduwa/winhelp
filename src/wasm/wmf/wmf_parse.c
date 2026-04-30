@@ -27,6 +27,18 @@
 #define META_EXTTEXTOUT           0x0A32
 #define META_DIBSTRETCHBLT        0x0B41
 
+/* WMF Escape function codes we recognize. */
+#define ESC_ENHANCED_METAFILE  0x000F  /* also Designer ASCII comments */
+#define ESC_BEGIN_PATH         0x1000
+#define ESC_CLIP_TO_PATH       0x1001
+#define ESC_END_PATH           0x1002
+
+/* Modes for ESC_CLIP_TO_PATH (low 16 bits of the DWORD parameter). */
+#define CLIP_MODE_SAVE      0
+#define CLIP_MODE_RESTORE   1
+#define CLIP_MODE_INTERSECT 2
+#define CLIP_MODE_EXCLUDE   3
+
 #define WMF_STACK_MAX 32
 #define WMF_OBJ_MAX   256
 
@@ -276,6 +288,23 @@ int wmf_parse(const uint8_t* data, size_t len,
     int stack_top = -1;
     Emitted em; memset(&em, 0, sizeof(em));
 
+    /* Path-tracking state for the BEGIN_PATH/END_PATH/CLIP_TO_PATH escape
+       sequence. Polylines/polygons/polypolygons issued while building a
+       path are diverted into path_sizes (one u16 per sub-poly) and
+       path_points (i16 x,y pairs) instead of being emitted; CLIP_TO_PATH
+       then flushes them as a CLIP_INTERSECT opcode payload. */
+    int building_path = 0;
+    Buf path_sizes;  buf_init(&path_sizes);
+    Buf path_points; buf_init(&path_points);
+    uint16_t path_npoly = 0;
+
+    /* Designer "Begin Skip" / "End Skip" comments wrap legacy fallback
+       drawing that smart viewers ignore. We render the fallback (since
+       we don't decode the GRADIENT comment) but drop the same primitives
+       when they're being collected into a clip path — empty stubs there
+       would corrupt the clip region. */
+    int skip_mode = 0;
+
     size_t off = 18;
     while (off + 6 <= len) {
         uint32_t rsize_words = get_u32(data, off);
@@ -406,32 +435,27 @@ int wmf_parse(const uint8_t* data, size_t len,
             break;
         }
 
-        case META_POLYLINE: {
-            if (parm_len < 2) break;
-            uint16_t n = get_u16(parm, 0);
-            if (parm_len < 2u + (size_t)n * 4u) break;
-            emit_pen_if_changed(&b, &state, &em);
-            buf_u8(&b, WMF_OP_POLYLINE);
-            buf_u16(&b, n);
-            for (uint16_t i = 0; i < n; i++) {
-                buf_i16(&b, get_i16(parm, 2 + (size_t)i * 4));
-                buf_i16(&b, get_i16(parm, 2 + (size_t)i * 4 + 2));
-            }
-            break;
-        }
+        case META_POLYLINE:
         case META_POLYGON: {
             if (parm_len < 2) break;
             uint16_t n = get_u16(parm, 0);
             if (parm_len < 2u + (size_t)n * 4u) break;
-            emit_pen_if_changed(&b, &state, &em);
-            emit_brush_if_changed(&b, &state, &em);
-            emit_pfm_if_changed(&b, &state, &em);
-            buf_u8(&b, WMF_OP_POLYGON);
-            buf_u16(&b, n);
-            for (uint16_t i = 0; i < n; i++) {
-                buf_i16(&b, get_i16(parm, 2 + (size_t)i * 4));
-                buf_i16(&b, get_i16(parm, 2 + (size_t)i * 4 + 2));
+            const uint8_t* pts = parm + 2;
+            if (building_path) {
+                if (skip_mode) break; /* drop placeholder polys */
+                buf_u16(&path_sizes, n);
+                buf_bytes(&path_points, pts, (size_t)n * 4);
+                path_npoly++;
+                break;
             }
+            emit_pen_if_changed(&b, &state, &em);
+            if (rfunc == META_POLYGON) {
+                emit_brush_if_changed(&b, &state, &em);
+                emit_pfm_if_changed(&b, &state, &em);
+            }
+            buf_u8(&b, rfunc == META_POLYGON ? WMF_OP_POLYGON : WMF_OP_POLYLINE);
+            buf_u16(&b, n);
+            buf_bytes(&b, pts, (size_t)n * 4);
             break;
         }
         case META_POLYPOLYGON: {
@@ -444,16 +468,25 @@ int wmf_parse(const uint8_t* data, size_t len,
             if (parm_len < 2u + (size_t)npoly * 2u + (size_t)total_pts * 4u) break;
             const uint8_t* pts = sizes + (size_t)npoly * 2;
 
+            if (building_path) {
+                if (skip_mode) break;
+                size_t pts_off = 0;
+                for (uint16_t i = 0; i < npoly; i++) {
+                    uint16_t sz = get_u16(sizes, (size_t)i * 2);
+                    buf_u16(&path_sizes, sz);
+                    buf_bytes(&path_points, pts + pts_off, (size_t)sz * 4);
+                    pts_off += (size_t)sz * 4;
+                    path_npoly++;
+                }
+                break;
+            }
             emit_pen_if_changed(&b, &state, &em);
             emit_brush_if_changed(&b, &state, &em);
             emit_pfm_if_changed(&b, &state, &em);
             buf_u8(&b, WMF_OP_POLYPOLYGON);
             buf_u16(&b, npoly);
-            for (uint16_t i = 0; i < npoly; i++) buf_u16(&b, get_u16(sizes, (size_t)i * 2));
-            for (uint32_t i = 0; i < total_pts; i++) {
-                buf_i16(&b, get_i16(pts, (size_t)i * 4));
-                buf_i16(&b, get_i16(pts, (size_t)i * 4 + 2));
-            }
+            buf_bytes(&b, sizes, (size_t)npoly * 2);
+            buf_bytes(&b, pts, (size_t)total_pts * 4);
             break;
         }
 
@@ -487,14 +520,76 @@ int wmf_parse(const uint8_t* data, size_t len,
             break;
         }
 
-        /* Records ignored in phase 3; later phases will plug in. */
+        case META_ESCAPE: {
+            if (parm_len < 4) break;
+            uint16_t esc_func = get_u16(parm, 0);
+            uint16_t byte_count = get_u16(parm, 2);
+            const uint8_t* esc_parm = parm + 4;
+            size_t esc_parm_len = parm_len > 4 ? parm_len - 4 : 0;
+            if (esc_parm_len > byte_count) esc_parm_len = byte_count;
+
+            switch (esc_func) {
+            case ESC_BEGIN_PATH:
+                building_path = 1;
+                path_sizes.len = 0;
+                path_points.len = 0;
+                path_npoly = 0;
+                break;
+            case ESC_END_PATH:
+                building_path = 0;
+                break;
+            case ESC_CLIP_TO_PATH: {
+                /* Payload begins with the 16-bit ByteCount we already
+                   read (it doubles as the inner record byte count); the
+                   mode is in the next DWORD's low word. */
+                if (esc_parm_len < 4) break;
+                uint16_t mode = (uint16_t)(get_u32(esc_parm, 0) & 0xFFFF);
+                if (mode == CLIP_MODE_SAVE) {
+                    buf_u8(&b, WMF_OP_CLIP_SAVE);
+                } else if (mode == CLIP_MODE_RESTORE) {
+                    buf_u8(&b, WMF_OP_CLIP_RESTORE);
+                } else if (mode == CLIP_MODE_INTERSECT && path_npoly > 0) {
+                    emit_pfm_if_changed(&b, &state, &em);
+                    buf_u8(&b, WMF_OP_CLIP_INTERSECT);
+                    buf_u16(&b, path_npoly);
+                    buf_bytes(&b, path_sizes.data, path_sizes.len);
+                    buf_bytes(&b, path_points.data, path_points.len);
+                }
+                /* CLIP_MODE_EXCLUDE (3) is a rare no-op approximation. */
+                break;
+            }
+            case ESC_ENHANCED_METAFILE: {
+                /* The body is either a Designer ASCII comment ("Begin
+                   Skip" / "End Skip" / "Begin Layer" / etc.) or an EMF
+                   chunk. We only act on the Skip pair; everything else
+                   is ignored. */
+                if (esc_parm_len < 1) break;
+                uint8_t b0 = esc_parm[0];
+                if (b0 != 0x42 && b0 != 0x45 && b0 != 0x47 && b0 != 0x4C) break;
+                size_t plen = esc_parm_len < 32 ? esc_parm_len : 32;
+                size_t i;
+                for (i = 0; i < plen && esc_parm[i]; i++) {}
+                if (i >= plen) break;
+                /* Compare against literal Designer tags. strncmp lets us
+                   safely match up to the NUL we just found. */
+                if (i == 10 && strncmp((const char*)esc_parm, "Begin Skip", 10) == 0) skip_mode = 1;
+                else if (i == 8  && strncmp((const char*)esc_parm, "End Skip", 8) == 0) skip_mode = 0;
+                /* Other Designer comments (Layer/Group/Gradient) — ignore. */
+                break;
+            }
+            default:
+                break;
+            }
+            break;
+        }
+
+        /* Records ignored in phase 4; phase 5 wires DIB blits. */
         case META_SETBKMODE:
         case META_SETMAPMODE:
         case META_SETSTRETCHBLTMODE:
         case META_SETTEXTALIGN:
         case META_INTERSECTCLIPRECT:
         case META_SELECTCLIPREGION:
-        case META_ESCAPE:
         case META_DIBBITBLT:
         case META_DIBSTRETCHBLT:
         default:
@@ -505,6 +600,10 @@ int wmf_parse(const uint8_t* data, size_t len,
     }
 
     buf_u8(&b, WMF_OP_END);
+
+    free(path_sizes.data);
+    free(path_points.data);
+
     if (b.oom) { free(b.data); hlp_set_error("WMF: oom"); return -1; }
 
     *out_ops = b.data;
