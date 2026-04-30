@@ -26,6 +26,7 @@
 #define META_DIBBITBLT            0x0940
 #define META_EXTTEXTOUT           0x0A32
 #define META_DIBSTRETCHBLT        0x0B41
+#define META_STRETCHDIB           0x0F43
 
 /* WMF Escape function codes we recognize. */
 #define ESC_ENHANCED_METAFILE  0x000F  /* also Designer ASCII comments */
@@ -252,6 +253,47 @@ static void emit_text_color_if_changed(Buf* b, State* st, Emitted* em) {
     buf_u32(b, st->text_color);
     em->text_color_valid = 1;
     em->text_color = st->text_color;
+}
+
+/* Decode a DIB starting with BITMAPINFOHEADER and emit a DIB_BLIT
+   opcode. dst_x/dst_y/dst_w/dst_h are in WMF logical coords; the
+   image is decoded to top-down RGBA at its natural pixel size. The
+   12-byte BITMAPCOREHEADER form is ignored (rare in WinHelp WMFs). */
+static void emit_dib_blit(Buf* b, const uint8_t* dib, size_t dib_len,
+                          int16_t dst_x, int16_t dst_y,
+                          int16_t dst_w, int16_t dst_h) {
+    if (dib_len < 40) return;
+    uint32_t bi_size = get_u32(dib, 0);
+    if (bi_size < 40 || bi_size > dib_len) return;
+    int32_t  width  = get_i32(dib, 4);
+    int32_t  height = get_i32(dib, 8);
+    uint16_t bpp    = get_u16(dib, 14);
+    uint32_t clrused = get_u32(dib, 32);
+    if (width <= 0 || height <= 0) return;
+    if (width > 65535 || height > 65535) return;
+
+    uint32_t ncolors = clrused;
+    if (!ncolors && bpp <= 8) ncolors = 1u << bpp;
+    /* Each palette entry in BITMAPINFOHEADER DIBs is RGBQUAD (4 bytes). */
+    size_t palette_bytes = (size_t)ncolors * 4;
+    if (bi_size + palette_bytes > dib_len) return;
+    const uint8_t* palette = dib + bi_size;
+    const uint8_t* pixels  = palette + palette_bytes;
+
+    uint32_t rgba_size = 0;
+    uint8_t* rgba = dib_to_rgba((uint32_t)width, (uint32_t)height, bpp,
+                                palette, ncolors, pixels, &rgba_size);
+    if (!rgba) return;
+
+    buf_u8(b, WMF_OP_DIB_BLIT);
+    buf_i16(b, dst_x);
+    buf_i16(b, dst_y);
+    buf_i16(b, dst_w);
+    buf_i16(b, dst_h);
+    buf_u16(b, (uint16_t)width);
+    buf_u16(b, (uint16_t)height);
+    buf_bytes(b, rgba, rgba_size);
+    free(rgba);
 }
 
 /* ---------- public API ---------------------------------------------- */
@@ -583,15 +625,87 @@ int wmf_parse(const uint8_t* data, size_t len,
             break;
         }
 
-        /* Records ignored in phase 4; phase 5 wires DIB blits. */
+        case META_DIBBITBLT: {
+            /* MS-WMF 2.3.1.2: 14B + DIB if has_bitmap, else 16B (extra
+               reserved word) and no DIB. Detection is a structural
+               size check, per the spec note. */
+            if (parm_len < 14) break;
+            int has_bitmap = (rsize_words != 12);
+            int16_t y_src = get_i16(parm, 4);
+            int16_t x_src = get_i16(parm, 6);
+            size_t off2 = 8;
+            if (!has_bitmap) off2 += 2; /* reserved word */
+            if (parm_len < off2 + 8) break;
+            int16_t height = get_i16(parm, off2);
+            int16_t width  = get_i16(parm, off2 + 2);
+            int16_t y_dst  = get_i16(parm, off2 + 4);
+            int16_t x_dst  = get_i16(parm, off2 + 6);
+
+            if (has_bitmap) {
+                size_t dib_off = off2 + 8;
+                if (parm_len <= dib_off) break;
+                emit_dib_blit(&b, parm + dib_off, parm_len - dib_off,
+                              x_dst, y_dst, width, height);
+            } else {
+                buf_u8(&b, WMF_OP_BIT_COPY);
+                buf_i16(&b, x_dst); buf_i16(&b, y_dst);
+                buf_i16(&b, x_src); buf_i16(&b, y_src);
+                buf_i16(&b, width); buf_i16(&b, height);
+            }
+            break;
+        }
+        case META_DIBSTRETCHBLT: {
+            /* MS-WMF 2.3.1.5: 18B + DIB if has_bitmap, else 20B + no DIB. */
+            if (parm_len < 18) break;
+            int has_bitmap = (rsize_words != 14);
+            int16_t src_h = get_i16(parm, 4);
+            int16_t src_w = get_i16(parm, 6);
+            int16_t y_src = get_i16(parm, 8);
+            int16_t x_src = get_i16(parm, 10);
+            size_t off2 = 12;
+            if (!has_bitmap) off2 += 2;
+            if (parm_len < off2 + 8) break;
+            int16_t dst_h = get_i16(parm, off2);
+            int16_t dst_w = get_i16(parm, off2 + 2);
+            int16_t y_dst = get_i16(parm, off2 + 4);
+            int16_t x_dst = get_i16(parm, off2 + 6);
+
+            if (has_bitmap) {
+                size_t dib_off = off2 + 8;
+                if (parm_len <= dib_off) break;
+                emit_dib_blit(&b, parm + dib_off, parm_len - dib_off,
+                              x_dst, y_dst, dst_w, dst_h);
+            } else {
+                buf_u8(&b, WMF_OP_BIT_COPY);
+                buf_i16(&b, x_dst); buf_i16(&b, y_dst);
+                buf_i16(&b, x_src); buf_i16(&b, y_src);
+                buf_i16(&b, src_w); buf_i16(&b, src_h);
+            }
+            break;
+        }
+        case META_STRETCHDIB: {
+            /* MS-WMF 2.3.1.3: 11 fixed words after rfunc, DIB always
+               present. RasterOp(4)/ColorUsage(2)/SrcH(2)/SrcW(2)/
+               YSrc(2)/XSrc(2)/DestH(2)/DestW(2)/YDest(2)/XDest(2)/DIB. */
+            if (parm_len < 22) break;
+            int16_t dst_h = get_i16(parm, 14);
+            int16_t dst_w = get_i16(parm, 16);
+            int16_t y_dst = get_i16(parm, 18);
+            int16_t x_dst = get_i16(parm, 20);
+            if (parm_len <= 22) break;
+            emit_dib_blit(&b, parm + 22, parm_len - 22,
+                          x_dst, y_dst, dst_w, dst_h);
+            break;
+        }
+
+        /* Records still ignored: BkMode/MapMode/StretchBltMode set DC
+           state we don't yet need; clip-rect/region are TODO. */
         case META_SETBKMODE:
         case META_SETMAPMODE:
         case META_SETSTRETCHBLTMODE:
         case META_SETTEXTALIGN:
         case META_INTERSECTCLIPRECT:
         case META_SELECTCLIPREGION:
-        case META_DIBBITBLT:
-        case META_DIBSTRETCHBLT:
         default:
             break;
         }

@@ -103,9 +103,9 @@ static uint8_t* decompress_gfx(const uint8_t* src, uint32_t csz, uint32_t sz,
 }
 
 /* Convert a paletted or RGB DIB to RGBA pixels */
-static uint8_t* dib_to_rgba(uint32_t width, uint32_t height, uint16_t bpp,
-                            const uint8_t* palette, uint32_t ncolors,
-                            const uint8_t* pixels, uint32_t* out_size) {
+uint8_t* dib_to_rgba(uint32_t width, uint32_t height, uint16_t bpp,
+                     const uint8_t* palette, uint32_t ncolors,
+                     const uint8_t* pixels, uint32_t* out_size) {
     uint32_t stride = ((width * bpp + 31) & ~31) / 8;
     uint32_t rgba_size = width * height * 4;
     uint8_t* rgba = malloc(rgba_size);

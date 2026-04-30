@@ -164,6 +164,14 @@ int hlp_decode_bitmap(HlpFile* hlp, uint32_t bm_index,
                       const uint8_t** out_ptr, size_t* out_len);
 void hlp_get_last_image_size(uint16_t* out_w, uint16_t* out_h, uint8_t* out_type);
 
+/* Convert a paletted/RGB/RGBA DIB pixel buffer to RGBA. Caller frees
+   the returned buffer with free(). Supports 1/4/8/24/32 bpp; row-padded
+   to 32-bit boundaries (DIB convention) and bottom-up (also DIB
+   convention — output is top-down). */
+uint8_t* dib_to_rgba(uint32_t width, uint32_t height, uint16_t bpp,
+                     const uint8_t* palette, uint32_t ncolors,
+                     const uint8_t* pixels, uint32_t* out_size);
+
 /* Peek at a |bm{index} subfile and return its picture type byte
    (5/6 = bitmap, 8 = metafile). Returns -1 if not found. */
 int hlp_peek_image_type(HlpFile* hlp, uint32_t bm_index);

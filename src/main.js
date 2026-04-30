@@ -246,6 +246,60 @@
                 break;
             }
 
+            case WMF_OP.DIB_BLIT: {
+                const dx = rd_i16(), dy = rd_i16();
+                const dw = rd_i16(), dh = rd_i16();
+                const w  = rd_u16(), h  = rd_u16();
+                /* Top-down RGBA payload, w*h*4 bytes. Wrap as
+                   ImageData, paint into an offscreen canvas, then
+                   drawImage so the current transform applies — unlike
+                   putImageData, which works in raw device pixels. */
+                const rgba = new Uint8ClampedArray(
+                    opsBytes.buffer, opsBytes.byteOffset + p, w * h * 4);
+                p += w * h * 4;
+                const off = document.createElement('canvas');
+                off.width = w; off.height = h;
+                off.getContext('2d').putImageData(new ImageData(rgba, w, h), 0, 0);
+                if (dw >= 0 && dh >= 0) {
+                    ctx.drawImage(off, dx, dy, dw || w, dh || h);
+                } else {
+                    ctx.save();
+                    ctx.translate(dx, dy);
+                    ctx.scale(dw < 0 ? -1 : 1, dh < 0 ? -1 : 1);
+                    ctx.drawImage(off, 0, 0, Math.abs(dw) || w, Math.abs(dh) || h);
+                    ctx.restore();
+                }
+                break;
+            }
+            case WMF_OP.BIT_COPY: {
+                const dx = rd_i16(), dy = rd_i16();
+                const sx = rd_i16(), sy = rd_i16();
+                const w  = rd_i16(), h  = rd_i16();
+                if (w <= 0 || h <= 0) break;
+                /* Canvas-to-canvas copy where both rects are in WMF
+                   logical coords. drawImage's source rect is in image
+                   (untransformed) space, so we map the logical source
+                   rect through the current transform first; the dest
+                   rect stays in user space and re-applies the
+                   transform automatically. WMF transforms are
+                   axis-aligned scale + translate (m.b = m.c = 0), so
+                   the rect stays axis-aligned even when extents are
+                   negative — we just normalize via min/abs. */
+                const m = ctx.getTransform();
+                const ix1 = m.a * sx + m.e;
+                const ix2 = m.a * (sx + w) + m.e;
+                const iy1 = m.d * sy + m.f;
+                const iy2 = m.d * (sy + h) + m.f;
+                const isx = Math.min(ix1, ix2);
+                const isy = Math.min(iy1, iy2);
+                const isw = Math.abs(ix2 - ix1);
+                const ish = Math.abs(iy2 - iy1);
+                if (isw > 0 && ish > 0) {
+                    ctx.drawImage(canvas, isx, isy, isw, ish, dx, dy, w, h);
+                }
+                break;
+            }
+
             default:
                 console.warn('wmf: unhandled opcode 0x' + op.toString(16));
                 /* Stop to avoid mis-reading subsequent bytes once we hit
