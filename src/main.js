@@ -94,7 +94,14 @@
         canvas.width = cw;
         canvas.height = ch;
         const ctx = canvas.getContext('2d');
+        /* GDI doesn't anti-alias drawing primitives. We disable both AA
+           knobs to match: imageSmoothingEnabled controls drawImage
+           interpolation (drives DIB blits); ctx.antialias is a
+           node-canvas extension for path AA — browsers ignore it but
+           it's harmless to set, and keeps main.js consistent with the
+           validator and refs/wmf/render.js. */
         ctx.imageSmoothingEnabled = false;
+        ctx.antialias = 'none';
         /* Initial transform mirrors refs/wmf/render.js exactly so files
            that don't change the window mid-stream stay pixel-identical
            to the baselines (scale*sign, then translate; round() inside
