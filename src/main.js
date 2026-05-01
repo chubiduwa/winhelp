@@ -725,11 +725,16 @@
             if (f.alignment === 2) style += 'text-align: center; ';
             if (style) currentPara.style.cssText = style;
 
-            /* Tab stops: absolute positions from paragraph left edge.
-               CSS tab-size sets the interval, not absolute position.
-               Use first tab stop as the tab width. */
+            /* Tab stops in WinHelp are absolute positions measured from
+               the paragraph's left margin column (not the indented
+               content edge). CSS tab-size only takes an interval, so
+               we approximate by using the first stop minus the
+               paragraph's own left indent — that way a leading bullet/
+               icon followed by a tab lands at the same absolute column
+               as a non-indented paragraph below. */
             if (f.tabStops.length > 0) {
-                currentPara.style.tabSize = tw(f.tabStops[0]) + 'pt';
+                const interval = tw(f.tabStops[0]) - tw(f.indentLeft || 0);
+                currentPara.style.tabSize = Math.max(0, interval) + 'pt';
             }
 
             currentPara.dataset.debug = `PARA off=${f.paraOffset} flags=0x${f.pflags.toString(16)} sb=${f.spaceBefore} sa=${f.spaceAfter} ls=${f.lineSpace} li=${f.indentLeft} fi=${f.indentFirst} tabs=[${f.tabStops}]`;
