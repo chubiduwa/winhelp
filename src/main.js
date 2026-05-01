@@ -28,6 +28,7 @@
         CLIP_SAVE: 0x0B, CLIP_RESTORE: 0x0C, CLIP_INTERSECT: 0x0D,
         DIB_BLIT: 0x0E, BIT_COPY: 0x0F,
         SET_WINDOW: 0x10, ELLIPSE: 0x11,
+        PIXEL: 0x12, ARC: 0x13, ROUNDRECT: 0x14,
     });
 
     /* COLORREF (0x00BBGGRR) -> CSS #RRGGBB. */
@@ -313,6 +314,87 @@
                 const rx = (right - left) / 2, ry = (bottom - top) / 2;
                 ctx.beginPath();
                 ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+                ctx.strokeStyle = wmfColor(pen.color);
+                ctx.fillStyle   = wmfColor(brush.color);
+                ctx.lineWidth   = penWidth(pen.width);
+                if (brush.style !== 1) ctx.fill();
+                if (pen.style !== 5) ctx.stroke();
+                break;
+            }
+            case WMF_OP.PIXEL: {
+                const x = rd_i16(), y = rd_i16(), c = rd_u32();
+                /* Map (x,y) through the current transform to device
+                   coords and paint a single device pixel via
+                   putImageData (which bypasses the transform), matching
+                   GDI SetPixel's "exactly one pixel" semantics. */
+                const m = ctx.getTransform();
+                const dx = Math.round(m.a * x + m.c * y + m.e);
+                const dy = Math.round(m.b * x + m.d * y + m.f);
+                if (dx >= 0 && dy >= 0 && dx < canvas.width && dy < canvas.height) {
+                    const r = c & 0xff, g = (c >> 8) & 0xff, b = (c >> 16) & 0xff;
+                    ctx.putImageData(
+                        new ImageData(new Uint8ClampedArray([r, g, b, 255]), 1, 1),
+                        dx, dy);
+                }
+                break;
+            }
+            case WMF_OP.ARC: {
+                const kind   = rd_u8();
+                const left   = rd_i16(), top    = rd_i16();
+                const right  = rd_i16(), bottom = rd_i16();
+                const xs     = rd_i16(), ys     = rd_i16();
+                const xe     = rd_i16(), ye     = rd_i16();
+                const cx = (left + right) / 2, cy = (top + bottom) / 2;
+                const rx = Math.abs(right - left) / 2;
+                const ry = Math.abs(bottom - top) / 2;
+                if (rx === 0 || ry === 0) break;
+                /* Convert each radial-line endpoint to a parametric
+                   ellipse angle: a point (px,py) on the ellipse sits
+                   at angle atan2((py-cy)/ry, (px-cx)/rx). */
+                const sa = Math.atan2((ys - cy) / ry, (xs - cx) / rx);
+                const ea = Math.atan2((ye - cy) / ry, (xe - cx) / rx);
+                ctx.beginPath();
+                /* GDI default arc direction is counter-clockwise (in
+                   screen-Y-down). Canvas2D's anticlockwise=true
+                   matches that visually. */
+                ctx.ellipse(cx, cy, rx, ry, 0, sa, ea, true);
+                if (kind === 1) {
+                    /* PIE: close to the center via two radial lines. */
+                    ctx.lineTo(cx, cy);
+                    ctx.closePath();
+                } else if (kind === 2) {
+                    /* CHORD: close via straight line between endpoints. */
+                    ctx.closePath();
+                }
+                ctx.strokeStyle = wmfColor(pen.color);
+                ctx.fillStyle   = wmfColor(brush.color);
+                ctx.lineWidth   = penWidth(pen.width);
+                if (kind !== 0 && brush.style !== 1) ctx.fill();
+                if (pen.style !== 5) ctx.stroke();
+                break;
+            }
+            case WMF_OP.ROUNDRECT: {
+                const left   = rd_i16(), top    = rd_i16();
+                const right  = rd_i16(), bottom = rd_i16();
+                const cw     = rd_i16(), ch     = rd_i16();
+                /* Clamp corner radii so they never exceed half the
+                   rect (otherwise the corner ellipses overlap). */
+                const w = right - left, h = bottom - top;
+                const rxc = Math.min(Math.abs(cw) / 2, Math.abs(w) / 2);
+                const ryc = Math.min(Math.abs(ch) / 2, Math.abs(h) / 2);
+                const x0 = Math.min(left, right), y0 = Math.min(top, bottom);
+                const x1 = Math.max(left, right), y1 = Math.max(top, bottom);
+                ctx.beginPath();
+                ctx.moveTo(x0 + rxc, y0);
+                ctx.lineTo(x1 - rxc, y0);
+                ctx.ellipse(x1 - rxc, y0 + ryc, rxc, ryc, 0, -Math.PI/2, 0);
+                ctx.lineTo(x1, y1 - ryc);
+                ctx.ellipse(x1 - rxc, y1 - ryc, rxc, ryc, 0, 0, Math.PI/2);
+                ctx.lineTo(x0 + rxc, y1);
+                ctx.ellipse(x0 + rxc, y1 - ryc, rxc, ryc, 0, Math.PI/2, Math.PI);
+                ctx.lineTo(x0, y0 + ryc);
+                ctx.ellipse(x0 + rxc, y0 + ryc, rxc, ryc, 0, Math.PI, 3*Math.PI/2);
+                ctx.closePath();
                 ctx.strokeStyle = wmfColor(pen.color);
                 ctx.fillStyle   = wmfColor(brush.color);
                 ctx.lineWidth   = penWidth(pen.width);

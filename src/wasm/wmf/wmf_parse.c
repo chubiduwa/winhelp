@@ -32,7 +32,12 @@
 #define META_DIBBITBLT            0x0940
 #define META_LINETO               0x0213
 #define META_MOVETO               0x0214
+#define META_SETPIXEL             0x041F
 #define META_TEXTOUT              0x0521
+#define META_ROUNDRECT            0x061C
+#define META_ARC                  0x0817
+#define META_PIE                  0x081A
+#define META_CHORD                0x0830
 #define META_EXTTEXTOUT           0x0A32
 #define META_DIBSTRETCHBLT        0x0B41
 #define META_STRETCHDIB           0x0F43
@@ -689,6 +694,72 @@ int wmf_parse(const uint8_t* data, size_t len,
             buf_i16(&b, cur_x); buf_i16(&b, cur_y);
             buf_i16(&b, x);     buf_i16(&b, y);
             cur_x = x; cur_y = y;
+            break;
+        }
+
+        case META_SETPIXEL: {
+            /* MS-WMF 2.3.3.19: ColorRef (4), Y (2), X (2). */
+            if (parm_len < 8) break;
+            uint32_t color = get_u32(parm, 0);
+            int16_t y = get_i16(parm, 4);
+            int16_t x = get_i16(parm, 6);
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            buf_u8(&b, WMF_OP_PIXEL);
+            buf_i16(&b, x);
+            buf_i16(&b, y);
+            buf_u32(&b, color);
+            break;
+        }
+
+        case META_ARC:
+        case META_PIE:
+        case META_CHORD: {
+            /* MS-WMF 2.3.3.1/2.3.3.13/2.3.3.7: linear order is YEnd,
+               XEnd, YStart, XStart, BottomRect, RightRect, TopRect,
+               LeftRect — each i16. The bounding rect defines the
+               ellipse; (xStart,yStart)/(xEnd,yEnd) are radial-ray
+               endpoints. */
+            if (parm_len < 16) break;
+            int16_t y_end   = get_i16(parm, 0);
+            int16_t x_end   = get_i16(parm, 2);
+            int16_t y_start = get_i16(parm, 4);
+            int16_t x_start = get_i16(parm, 6);
+            int16_t bottom  = get_i16(parm, 8);
+            int16_t right   = get_i16(parm, 10);
+            int16_t top     = get_i16(parm, 12);
+            int16_t left    = get_i16(parm, 14);
+            uint8_t kind = (rfunc == META_ARC) ? 0 :
+                           (rfunc == META_PIE) ? 1 : 2;
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            emit_pen_if_changed(&b, &state, &em);
+            if (kind != 0) emit_brush_if_changed(&b, &state, &em);
+            buf_u8(&b, WMF_OP_ARC);
+            buf_u8(&b, kind);
+            buf_i16(&b, left); buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, bottom);
+            buf_i16(&b, x_start); buf_i16(&b, y_start);
+            buf_i16(&b, x_end); buf_i16(&b, y_end);
+            break;
+        }
+
+        case META_ROUNDRECT: {
+            /* MS-WMF 2.3.3.18: Height (i16), Width (i16) — corner
+               ellipse axes — then BottomRect, RightRect, TopRect,
+               LeftRect. */
+            if (parm_len < 12) break;
+            int16_t corner_h = get_i16(parm, 0);
+            int16_t corner_w = get_i16(parm, 2);
+            int16_t bottom   = get_i16(parm, 4);
+            int16_t right    = get_i16(parm, 6);
+            int16_t top      = get_i16(parm, 8);
+            int16_t left     = get_i16(parm, 10);
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            emit_pen_if_changed(&b, &state, &em);
+            emit_brush_if_changed(&b, &state, &em);
+            buf_u8(&b, WMF_OP_ROUNDRECT);
+            buf_i16(&b, left); buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, bottom);
+            buf_i16(&b, corner_w); buf_i16(&b, corner_h);
             break;
         }
 

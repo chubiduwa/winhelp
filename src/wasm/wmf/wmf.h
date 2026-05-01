@@ -39,6 +39,25 @@
                                           pen/brush. RECTANGLE has no
                                           opcode; the parser emits a
                                           4-point POLYGON instead. */
+#define WMF_OP_PIXEL             0x12  /* i16 x, i16 y, u32 color —
+                                          paints a single device pixel
+                                          (after the current transform)
+                                          for META_SETPIXEL. */
+#define WMF_OP_ARC               0x13  /* u8 kind (0=arc, 1=pie,
+                                          2=chord), i16 left, top,
+                                          right, bottom, i16 xs, ys,
+                                          xe, ye. The bounding rect
+                                          defines the ellipse; (xs,ys)
+                                          and (xe,ye) are radial-line
+                                          endpoints (where each radial
+                                          ray, drawn from the center,
+                                          intersects the ellipse).
+                                          Drawn counter-clockwise per
+                                          GDI default. */
+#define WMF_OP_ROUNDRECT         0x14  /* i16 left, top, right, bottom,
+                                          cornerW, cornerH — rounded
+                                          rectangle with elliptical
+                                          corners of size (cw,ch). */
 
 /* Parse a decompressed WMF buffer and emit an opcode stream.
    On success, *out_ops points to a malloc'd buffer (caller frees) of
