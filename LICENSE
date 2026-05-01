@@ -18,6 +18,7 @@ Portions of the implementation were informed by the following projects:
   - Wine winhlp32 (LGPL-2.1-or-later) — https://www.winehq.org
   - helpdeco (GPL-2.0) — https://github.com/pmachapman/helpdeco
   - HLP format documentation by Manfred Winterhoff (part of helpdeco)
+  - js-wmf (Apache-2.0) — https://github.com/SheetJS/js-wmf
 
 Vendored dependencies under src/wasm/vendor/ retain their own licenses:
   - TLSF allocator (BSD)

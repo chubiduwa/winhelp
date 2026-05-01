@@ -27,6 +27,7 @@ leaves the browser.
 - Non-scrolling and scrolling regions
 - Embedded bitmaps (DIB / device-independent) and segmented hypergraphics (SHG)
   with clickable hotspot overlays
+- Windows metafiles (WMF)
 - Windows codepages (1250-1258), plus Shift_JIS, EUC-KR, GB2312, Big5 via
   charset detection or LCID fallback
 - Right-to-left layout for Arabic and Hebrew files
@@ -57,8 +58,8 @@ leaves the browser.
 
 ## Not supported
 
-- Vector WMF / EMF metafile rendering (type-8 images with embedded DIBs do
-  render; pure GDI command streams do not)
+- EMF (Enhanced Metafile) rendering — only WMF; EMF embeds inside WMFs are
+  not decoded
 - Full-text search (`|FTINDEX`)
 - Multimedia Viewer extensions beyond basic MVB font compatibility
 - Cross-file links to external `.hlp` files
