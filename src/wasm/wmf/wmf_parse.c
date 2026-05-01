@@ -30,6 +30,7 @@
 #define META_CREATEBRUSHINDIRECT  0x02FC
 #define META_POLYPOLYGON          0x0538
 #define META_DIBBITBLT            0x0940
+#define META_TEXTOUT              0x0521
 #define META_EXTTEXTOUT           0x0A32
 #define META_DIBSTRETCHBLT        0x0B41
 #define META_STRETCHDIB           0x0F43
@@ -641,6 +642,29 @@ int wmf_parse(const uint8_t* data, size_t len,
                 state.has_text_color = 1;
             }
             break;
+
+        case META_TEXTOUT: {
+            /* MS-WMF 2.3.3.20: StringLength (i16), String (StringLength
+               bytes, padded to a 16-bit boundary), YStart, XStart. */
+            if (parm_len < 2) break;
+            int16_t slen = get_i16(parm, 0);
+            if (slen < 0) break;
+            size_t pad = (size_t)slen + ((slen & 1) ? 1 : 0);
+            if (parm_len < 2 + pad + 4) break;
+            int16_t y = get_i16(parm, 2 + pad);
+            int16_t x = get_i16(parm, 2 + pad + 2);
+
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            emit_font_if_changed(&b, &state, &em);
+            emit_text_color_if_changed(&b, &state, &em);
+
+            buf_u8(&b, WMF_OP_TEXT);
+            buf_i16(&b, x);
+            buf_i16(&b, y);
+            buf_u16(&b, (uint16_t)slen);
+            buf_bytes(&b, parm + 2, (size_t)slen);
+            break;
+        }
 
         case META_EXTTEXTOUT: {
             /* MS-WMF 2.3.3.5: Y, X, StringLength, fwOpts, [Rectangle (8B)
