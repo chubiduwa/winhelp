@@ -325,7 +325,8 @@ static void emit_text_color_if_changed(Buf* b, State* st, Emitted* em) {
    12-byte BITMAPCOREHEADER form is ignored (rare in WinHelp WMFs). */
 static void emit_dib_blit(Buf* b, const uint8_t* dib, size_t dib_len,
                           int16_t dst_x, int16_t dst_y,
-                          int16_t dst_w, int16_t dst_h) {
+                          int16_t dst_w, int16_t dst_h,
+                          uint32_t rop) {
     if (dib_len < 40) return;
     uint32_t bi_size = get_u32(dib, 0);
     if (bi_size < 40 || bi_size > dib_len) return;
@@ -350,6 +351,7 @@ static void emit_dib_blit(Buf* b, const uint8_t* dib, size_t dib_len,
     if (!rgba) return;
 
     buf_u8(b, WMF_OP_DIB_BLIT);
+    buf_u32(b, rop);
     buf_i16(b, dst_x);
     buf_i16(b, dst_y);
     buf_i16(b, dst_w);
@@ -880,11 +882,12 @@ int wmf_parse(const uint8_t* data, size_t len,
         }
 
         case META_DIBBITBLT: {
-            /* MS-WMF 2.3.1.2: 14B + DIB if has_bitmap, else 16B (extra
-               reserved word) and no DIB. Detection is a structural
-               size check, per the spec note. */
+            /* MS-WMF 2.3.1.2: RasterOperation(4) + 14B + DIB if
+               has_bitmap, else 16B (extra reserved word) and no DIB.
+               Detection is a structural size check, per the spec note. */
             if (parm_len < 14) break;
             int has_bitmap = (rsize_words != 12);
+            uint32_t rop  = get_u32(parm, 0);
             int16_t y_src = get_i16(parm, 4);
             int16_t x_src = get_i16(parm, 6);
             size_t off2 = 8;
@@ -900,9 +903,10 @@ int wmf_parse(const uint8_t* data, size_t len,
                 size_t dib_off = off2 + 8;
                 if (parm_len <= dib_off) break;
                 emit_dib_blit(&b, parm + dib_off, parm_len - dib_off,
-                              x_dst, y_dst, width, height);
+                              x_dst, y_dst, width, height, rop);
             } else {
                 buf_u8(&b, WMF_OP_BIT_COPY);
+                buf_u32(&b, rop);
                 buf_i16(&b, x_dst); buf_i16(&b, y_dst);
                 buf_i16(&b, x_src); buf_i16(&b, y_src);
                 buf_i16(&b, width); buf_i16(&b, height);
@@ -910,9 +914,11 @@ int wmf_parse(const uint8_t* data, size_t len,
             break;
         }
         case META_DIBSTRETCHBLT: {
-            /* MS-WMF 2.3.1.5: 18B + DIB if has_bitmap, else 20B + no DIB. */
+            /* MS-WMF 2.3.1.5: RasterOperation(4) + 18B + DIB if
+               has_bitmap, else 20B + no DIB. */
             if (parm_len < 18) break;
             int has_bitmap = (rsize_words != 14);
+            uint32_t rop  = get_u32(parm, 0);
             int16_t src_h = get_i16(parm, 4);
             int16_t src_w = get_i16(parm, 6);
             int16_t y_src = get_i16(parm, 8);
@@ -930,9 +936,10 @@ int wmf_parse(const uint8_t* data, size_t len,
                 size_t dib_off = off2 + 8;
                 if (parm_len <= dib_off) break;
                 emit_dib_blit(&b, parm + dib_off, parm_len - dib_off,
-                              x_dst, y_dst, dst_w, dst_h);
+                              x_dst, y_dst, dst_w, dst_h, rop);
             } else {
                 buf_u8(&b, WMF_OP_BIT_COPY);
+                buf_u32(&b, rop);
                 buf_i16(&b, x_dst); buf_i16(&b, y_dst);
                 buf_i16(&b, x_src); buf_i16(&b, y_src);
                 buf_i16(&b, src_w); buf_i16(&b, src_h);
@@ -985,6 +992,7 @@ int wmf_parse(const uint8_t* data, size_t len,
                present. RasterOp(4)/ColorUsage(2)/SrcH(2)/SrcW(2)/
                YSrc(2)/XSrc(2)/DestH(2)/DestW(2)/YDest(2)/XDest(2)/DIB. */
             if (parm_len < 22) break;
+            uint32_t rop  = get_u32(parm, 0);
             int16_t dst_h = get_i16(parm, 14);
             int16_t dst_w = get_i16(parm, 16);
             int16_t y_dst = get_i16(parm, 18);
@@ -992,7 +1000,7 @@ int wmf_parse(const uint8_t* data, size_t len,
             if (parm_len <= 22) break;
             try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
             emit_dib_blit(&b, parm + 22, parm_len - 22,
-                          x_dst, y_dst, dst_w, dst_h);
+                          x_dst, y_dst, dst_w, dst_h, rop);
             break;
         }
 

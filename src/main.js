@@ -40,6 +40,122 @@
             ((c >> 16) & 0xff).toString(16).padStart(2, '0');
     }
 
+    /* GDI ternary raster operation. The ROP3's high byte is a truth
+       table over (P, S, D) bits — bit at index (P<<2)|(S<<1)|D gives
+       the result bit. */
+    function applyRop3Byte(s, d, p, ropBit) {
+        let r = 0;
+        for (let bit = 0; bit < 8; bit++) {
+            const S = (s >> bit) & 1;
+            const D = (d >> bit) & 1;
+            const P = (p >> bit) & 1;
+            r |= ropBit[(P << 2) | (S << 1) | D] << bit;
+        }
+        return r;
+    }
+
+    /* Blit a source canvas into the main canvas with a GDI ROP3.
+       Native GDI blits against real DC pixels; we render onto an
+       isolated canvas whose unpainted state (alpha=0) represents
+       "page background shows through". For ROPs whose truth table
+       preserves D when S=1 (the SRCAND family — bits 2,3,6,7 of the
+       ROP byte form the pattern 0,1,0,1), running the ROP against an
+       assumed-white dst would emit opaque white where bg should show.
+       For those ROPs on a transparent dst pixel, we instead encode
+       the "preserve" intent into alpha: alpha = 255 - max(src.rgb),
+       carrying the original src color through. This is exact for
+       1-bit black/white masks (the common case — character tables,
+       transparent-overlay clip-art) and a reasonable approximation
+       for grayscale.
+       Other ROPs run the truth table per bit per channel against
+       current canvas pixels, treating dst alpha=0 as opaque white (a
+       sane DC default). Pattern is default-white (no pattern brush
+       plumbed yet). */
+    function blitWithRop(ctx, srcCanvas, dx, dy, dw, dh, sw, sh, rop) {
+        if (rop === 0x00CC0020 /* SRCCOPY */) {
+            if (dw >= 0 && dh >= 0) {
+                ctx.drawImage(srcCanvas, dx, dy, dw, dh);
+            } else {
+                ctx.save();
+                ctx.translate(dx, dy);
+                ctx.scale(dw < 0 ? -1 : 1, dh < 0 ? -1 : 1);
+                ctx.drawImage(srcCanvas, 0, 0, Math.abs(dw) || sw, Math.abs(dh) || sh);
+                ctx.restore();
+            }
+            return;
+        }
+
+        /* Map logical dst rect to device pixels. */
+        const m = ctx.getTransform();
+        const devX0 = m.a * dx + m.c * dy + m.e;
+        const devY0 = m.b * dx + m.d * dy + m.f;
+        const devX1 = m.a * (dx + dw) + m.c * (dy + dh) + m.e;
+        const devY1 = m.b * (dx + dw) + m.d * (dy + dh) + m.f;
+        const dstX = Math.round(Math.min(devX0, devX1));
+        const dstY = Math.round(Math.min(devY0, devY1));
+        const dstW = Math.max(1, Math.round(Math.abs(devX1 - devX0)));
+        const dstH = Math.max(1, Math.round(Math.abs(devY1 - devY0)));
+        if (dstX + dstW <= 0 || dstY + dstH <= 0 ||
+            dstX >= ctx.canvas.width || dstY >= ctx.canvas.height) return;
+
+        /* Stretch src into device-sized offscreen, honoring negative
+           dw/dh for axis flips. */
+        const stretched = new OffscreenCanvas(dstW, dstH);
+        const sctx = stretched.getContext('2d');
+        sctx.imageSmoothingEnabled = false;
+        sctx.save();
+        if (devX1 < devX0) { sctx.translate(dstW, 0); sctx.scale(-1, 1); }
+        if (devY1 < devY0) { sctx.translate(0, dstH); sctx.scale(1, -1); }
+        sctx.drawImage(srcCanvas, 0, 0, dstW, dstH);
+        sctx.restore();
+
+        const clipX0 = Math.max(0, dstX);
+        const clipY0 = Math.max(0, dstY);
+        const clipX1 = Math.min(ctx.canvas.width,  dstX + dstW);
+        const clipY1 = Math.min(ctx.canvas.height, dstY + dstH);
+        const clipW = clipX1 - clipX0;
+        const clipH = clipY1 - clipY0;
+        if (clipW <= 0 || clipH <= 0) return;
+
+        const srcSlice = sctx.getImageData(clipX0 - dstX, clipY0 - dstY, clipW, clipH).data;
+        const dstImg   = ctx.getImageData(clipX0, clipY0, clipW, clipH);
+        const dstData  = dstImg.data;
+
+        const ropByte = (rop >>> 16) & 0xFF;
+        const ropBit = new Uint8Array(8);
+        for (let i = 0; i < 8; i++) ropBit[i] = (ropByte >> i) & 1;
+        /* "Preserves D when S=1" — truth-table rows (P,S=1,D=0)→0 and
+           (P,S=1,D=1)→1, both for P=0 and P=1, i.e. ropBit[2,3,6,7] =
+           (0,1,0,1). SRCAND (0x88) is the canonical member. */
+        const preservesD = ropBit[2] === 0 && ropBit[3] === 1 &&
+                           ropBit[6] === 0 && ropBit[7] === 1;
+        const PAT = 0xFF;
+
+        for (let i = 0; i < dstData.length; i += 4) {
+            const sR = srcSlice[i], sG = srcSlice[i+1], sB = srcSlice[i+2];
+            const dA = dstData[i+3];
+            if (preservesD && dA === 0) {
+                /* Encode "preserve dst" semantic into alpha: bright src
+                   → transparent (page bg shows through), dark src →
+                   opaque src color (the AND-against-bg result). */
+                const sMax = sR > sG ? (sR > sB ? sR : sB) : (sG > sB ? sG : sB);
+                dstData[i  ] = sR;
+                dstData[i+1] = sG;
+                dstData[i+2] = sB;
+                dstData[i+3] = 255 - sMax;
+            } else {
+                const dR = dA === 0 ? 0xFF : dstData[i];
+                const dG = dA === 0 ? 0xFF : dstData[i+1];
+                const dB = dA === 0 ? 0xFF : dstData[i+2];
+                dstData[i  ] = applyRop3Byte(sR, dR, PAT, ropBit);
+                dstData[i+1] = applyRop3Byte(sG, dG, PAT, ropBit);
+                dstData[i+2] = applyRop3Byte(sB, dB, PAT, ropBit);
+                dstData[i+3] = 0xFF;
+            }
+        }
+        ctx.putImageData(dstImg, clipX0, clipY0);
+    }
+
     /* Map a Windows GDI CharSet byte to a TextDecoder encoding label.
        Browsers natively support the SBCS windows-12xx pages and the DBCS
        legacy encodings (shift-jis, gbk, euc-kr, big5), so we don't need
@@ -92,9 +208,7 @@
         const cw = Math.max(1, Math.round(w * scale));
         const ch = Math.max(1, Math.round(h * scale));
 
-        const canvas = document.createElement('canvas');
-        canvas.width = cw;
-        canvas.height = ch;
+        const canvas = new OffscreenCanvas(cw, ch);
         const ctx = canvas.getContext('2d');
         /* GDI doesn't anti-alias drawing primitives. Both knobs off:
            imageSmoothingEnabled drives drawImage interpolation (DIB
@@ -278,6 +392,7 @@
             }
 
             case WMF_OP.DIB_BLIT: {
+                const rop = rd_u32();
                 const dx = rd_i16(), dy = rd_i16();
                 const dw = rd_i16(), dh = rd_i16();
                 const w  = rd_u16(), h  = rd_u16();
@@ -288,18 +403,9 @@
                 const rgba = new Uint8ClampedArray(
                     opsBytes.buffer, opsBytes.byteOffset + p, w * h * 4);
                 p += w * h * 4;
-                const off = document.createElement('canvas');
-                off.width = w; off.height = h;
+                const off = new OffscreenCanvas(w, h);
                 off.getContext('2d').putImageData(new ImageData(rgba, w, h), 0, 0);
-                if (dw >= 0 && dh >= 0) {
-                    ctx.drawImage(off, dx, dy, dw || w, dh || h);
-                } else {
-                    ctx.save();
-                    ctx.translate(dx, dy);
-                    ctx.scale(dw < 0 ? -1 : 1, dh < 0 ? -1 : 1);
-                    ctx.drawImage(off, 0, 0, Math.abs(dw) || w, Math.abs(dh) || h);
-                    ctx.restore();
-                }
+                blitWithRop(ctx, off, dx, dy, dw || w, dh || h, w, h, rop);
                 break;
             }
             case WMF_OP.SET_WINDOW: {
@@ -430,19 +536,15 @@
                 break;
             }
             case WMF_OP.BIT_COPY: {
+                const rop = rd_u32();
                 const dx = rd_i16(), dy = rd_i16();
                 const sx = rd_i16(), sy = rd_i16();
                 const w  = rd_i16(), h  = rd_i16();
                 if (w <= 0 || h <= 0) break;
-                /* Canvas-to-canvas copy where both rects are in WMF
-                   logical coords. drawImage's source rect is in image
-                   (untransformed) space, so we map the logical source
-                   rect through the current transform first; the dest
-                   rect stays in user space and re-applies the
-                   transform automatically. WMF transforms are
-                   axis-aligned scale + translate (m.b = m.c = 0), so
-                   the rect stays axis-aligned even when extents are
-                   negative — we just normalize via min/abs. */
+                /* Canvas-to-canvas copy. Snapshot the source rect into
+                   an offscreen at logical-space size and dispatch
+                   through blitWithRop so non-SRCCOPY ROPs go through
+                   the same per-pixel path as DIB blits. */
                 const m = ctx.getTransform();
                 const ix1 = m.a * sx + m.e;
                 const ix2 = m.a * (sx + w) + m.e;
@@ -452,9 +554,10 @@
                 const isy = Math.min(iy1, iy2);
                 const isw = Math.abs(ix2 - ix1);
                 const ish = Math.abs(iy2 - iy1);
-                if (isw > 0 && ish > 0) {
-                    ctx.drawImage(canvas, isx, isy, isw, ish, dx, dy, w, h);
-                }
+                if (!(isw > 0 && ish > 0)) break;
+                const off = new OffscreenCanvas(Math.ceil(isw), Math.ceil(ish));
+                off.getContext('2d').drawImage(canvas, isx, isy, isw, ish, 0, 0, off.width, off.height);
+                blitWithRop(ctx, off, dx, dy, w, h, off.width, off.height, rop);
                 break;
             }
 
@@ -467,10 +570,7 @@
             }
         }
 
-        return new Promise((resolve, reject) => {
-            canvas.toBlob(b => b ? resolve(b) : reject(new Error('toBlob failed')),
-                          'image/png');
-        });
+        return canvas.convertToBlob({ type: 'image/png' });
     }
 
     const { instance } = await WebAssembly.instantiateStreaming(

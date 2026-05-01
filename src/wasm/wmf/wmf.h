@@ -28,8 +28,15 @@
 #define WMF_OP_CLIP_SAVE         0x0B
 #define WMF_OP_CLIP_RESTORE      0x0C
 #define WMF_OP_CLIP_INTERSECT    0x0D  /* same payload as POLYPOLYGON */
-#define WMF_OP_DIB_BLIT          0x0E  /* i16 dx,dy,dw,dh; u16 w,h; rgba w*h*4 */
-#define WMF_OP_BIT_COPY          0x0F  /* i16 dx,dy,sx,sy,w,h */
+#define WMF_OP_DIB_BLIT          0x0E  /* u32 rop3; i16 dx,dy,dw,dh;
+                                          u16 w,h; rgba w*h*4. The
+                                          rop3 is the GDI ternary
+                                          raster op (e.g. 0x00CC0020
+                                          SRCCOPY, 0x008800C6 SRCAND);
+                                          dispatcher applies it
+                                          per-pixel against current
+                                          canvas pixels. */
+#define WMF_OP_BIT_COPY          0x0F  /* u32 rop3; i16 dx,dy,sx,sy,w,h */
 #define WMF_OP_SET_WINDOW        0x10  /* i16 orgX, orgY, extX, extY —
                                           mid-stream SetWindowOrg/Ext
                                           after BOUNDS has been locked. */
