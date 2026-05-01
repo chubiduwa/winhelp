@@ -20,6 +20,8 @@
 #define META_SETWINDOWEXT         0x020C
 #define META_POLYGON              0x0324
 #define META_POLYLINE             0x0325
+#define META_ELLIPSE              0x0418
+#define META_RECTANGLE            0x041B
 #define META_ESCAPE               0x0626
 #define META_INTERSECTCLIPRECT    0x0416
 #define META_DELETEOBJECT         0x01F0
@@ -282,6 +284,21 @@ static void try_lock_bounds(Buf* b, size_t bounds_off, const State* st,
     *last_org_y = st->win_org_y;
     *last_ext_x = st->win_ext_x;
     *last_ext_y = st->win_ext_y;
+}
+
+/* ctx.save / ctx.restore reverts pen / brush / font / text-color on the
+   dispatcher side, so our coalescer's "last emitted" view becomes
+   stale after a CLIP_RESTORE. Without this invalidation, a draw op
+   following the restore can match em exactly, skip its SET_*, and
+   then use the post-restore canvas state (which is the *outside*
+   bracket value) instead of our intended inside-bracket value.
+   PolyFillMode is an argument to ctx.fill(), not canvas state, so
+   it's not affected by save/restore — we leave em.pfm alone. */
+static void em_invalidate_canvas_state(Emitted* em) {
+    em->pen_valid = 0;
+    em->brush_valid = 0;
+    em->font_valid = 0;
+    em->text_color_valid = 0;
 }
 
 static void emit_text_color_if_changed(Buf* b, State* st, Emitted* em) {
@@ -557,6 +574,7 @@ int wmf_parse(const uint8_t* data, size_t len,
                 stack_top = idx - 1;
             }
             buf_u8(&b, WMF_OP_CLIP_RESTORE);
+            em_invalidate_canvas_state(&em);
             break;
         }
 
@@ -677,6 +695,7 @@ int wmf_parse(const uint8_t* data, size_t len,
                     buf_u8(&b, WMF_OP_CLIP_SAVE);
                 } else if (mode == CLIP_MODE_RESTORE) {
                     buf_u8(&b, WMF_OP_CLIP_RESTORE);
+                    em_invalidate_canvas_state(&em);
                 } else if (mode == CLIP_MODE_INTERSECT && path_npoly > 0) {
                     try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
                     emit_pfm_if_changed(&b, &state, &em);
@@ -696,14 +715,16 @@ int wmf_parse(const uint8_t* data, size_t len,
                 if (esc_parm_len < 1) break;
                 uint8_t b0 = esc_parm[0];
                 if (b0 != 0x42 && b0 != 0x45 && b0 != 0x47 && b0 != 0x4C) break;
+                /* Body length is bc bytes; the string may or may not be
+                   NUL-terminated within it (e.g. 1PROCOMP.WMF stores
+                   "Begin Skip" with bc=10 and no trailing NUL). Stop at
+                   the first NUL we see, otherwise treat the whole body
+                   as the string — matches js-wmf's read-until-NUL-or-end. */
                 size_t plen = esc_parm_len < 32 ? esc_parm_len : 32;
-                size_t i;
-                for (i = 0; i < plen && esc_parm[i]; i++) {}
-                if (i >= plen) break;
-                /* Compare against literal Designer tags. strncmp lets us
-                   safely match up to the NUL we just found. */
-                if (i == 10 && strncmp((const char*)esc_parm, "Begin Skip", 10) == 0) skip_mode = 1;
-                else if (i == 8  && strncmp((const char*)esc_parm, "End Skip", 8) == 0) skip_mode = 0;
+                size_t slen;
+                for (slen = 0; slen < plen && esc_parm[slen]; slen++) {}
+                if (slen == 10 && strncmp((const char*)esc_parm, "Begin Skip", 10) == 0) skip_mode = 1;
+                else if (slen == 8 && strncmp((const char*)esc_parm, "End Skip",  8) == 0) skip_mode = 0;
                 /* Other Designer comments (Layer/Group/Gradient) — ignore. */
                 break;
             }
@@ -771,6 +792,47 @@ int wmf_parse(const uint8_t* data, size_t len,
                 buf_i16(&b, x_src); buf_i16(&b, y_src);
                 buf_i16(&b, src_w); buf_i16(&b, src_h);
             }
+            break;
+        }
+        case META_RECTANGLE: {
+            /* MS-WMF 2.3.3.17: 4 i16 (Bottom, Right, Top, Left).
+               GDI fills the inclusive rect (left..right, top..bottom)
+               with the current brush and strokes the outline with the
+               current pen — same as a 4-point POLYGON of the corners,
+               so we emit one instead of inventing a new opcode. */
+            if (parm_len < 8) break;
+            int16_t bot   = get_i16(parm, 0);
+            int16_t right = get_i16(parm, 2);
+            int16_t top   = get_i16(parm, 4);
+            int16_t left  = get_i16(parm, 6);
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            emit_pen_if_changed(&b, &state, &em);
+            emit_brush_if_changed(&b, &state, &em);
+            emit_pfm_if_changed(&b, &state, &em);
+            buf_u8(&b, WMF_OP_POLYGON);
+            buf_u16(&b, 4);
+            buf_i16(&b, left);  buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, bot);
+            buf_i16(&b, left);  buf_i16(&b, bot);
+            break;
+        }
+        case META_ELLIPSE: {
+            /* MS-WMF 2.3.3.3: 4 i16 (Bottom, Right, Top, Left). The
+               ellipse is inscribed in this bounding rect. We emit a
+               native ELLIPSE opcode rather than approximating with a
+               polygon — Canvas2D's ctx.ellipse renders cleaner. */
+            if (parm_len < 8) break;
+            int16_t bot   = get_i16(parm, 0);
+            int16_t right = get_i16(parm, 2);
+            int16_t top   = get_i16(parm, 4);
+            int16_t left  = get_i16(parm, 6);
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            emit_pen_if_changed(&b, &state, &em);
+            emit_brush_if_changed(&b, &state, &em);
+            buf_u8(&b, WMF_OP_ELLIPSE);
+            buf_i16(&b, left); buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, bot);
             break;
         }
         case META_STRETCHDIB: {

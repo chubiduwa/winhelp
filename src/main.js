@@ -27,7 +27,7 @@
         TEXT: 0x0A,
         CLIP_SAVE: 0x0B, CLIP_RESTORE: 0x0C, CLIP_INTERSECT: 0x0D,
         DIB_BLIT: 0x0E, BIT_COPY: 0x0F,
-        SET_WINDOW: 0x10,
+        SET_WINDOW: 0x10, ELLIPSE: 0x11,
     });
 
     /* COLORREF (0x00BBGGRR) -> CSS #RRGGBB. */
@@ -94,24 +94,18 @@
         canvas.width = cw;
         canvas.height = ch;
         const ctx = canvas.getContext('2d');
-        /* GDI doesn't anti-alias drawing primitives. We disable both AA
-           knobs to match: imageSmoothingEnabled controls drawImage
-           interpolation (drives DIB blits); ctx.antialias is a
-           node-canvas extension for path AA — browsers ignore it but
-           it's harmless to set, and keeps main.js consistent with the
-           validator and refs/wmf/render.js. */
+        /* GDI doesn't anti-alias drawing primitives. Both knobs off:
+           imageSmoothingEnabled drives drawImage interpolation (DIB
+           blits); ctx.antialias is a node-canvas extension for path
+           AA — browsers ignore it but it's harmless to set. */
         ctx.imageSmoothingEnabled = false;
         ctx.antialias = 'none';
-        /* Initial transform mirrors refs/wmf/render.js exactly so files
-           that don't change the window mid-stream stay pixel-identical
-           to the baselines (scale*sign, then translate; round() inside
-           cw/ch alone would drift one pixel on many files). */
-        ctx.scale(scale * (extX < 0 ? -1 : 1), scale * (extY < 0 ? -1 : 1));
-        ctx.translate(-orgX, -orgY);
 
-        /* SET_WINDOW (mid-stream SetWindowOrg/Ext changes) maps a new
-           logical window into the same device pixels (cw, ch) — by
-           definition not the original window, so we use cw/ch directly. */
+        /* Map a logical window into the canvas's device pixels. Used
+           for the initial BOUNDS-derived transform AND for mid-stream
+           SET_WINDOW updates so the same formula applies in both —
+           keeps us bit-identical to refs/wmf/render.js (which now
+           handles mid-stream window changes the same way). */
         const applyWindow = (oX, oY, eX, eY) => {
             if (!eX || !eY) return;
             const sx = cw / Math.abs(eX) * (eX < 0 ? -1 : 1);
@@ -119,6 +113,7 @@
             ctx.setTransform(sx, 0, 0, sy, 0, 0);
             ctx.translate(-oX, -oY);
         };
+        applyWindow(orgX, orgY, extX, extY);
 
         /* Snap a pen width up to the next integer device pixel so wider
            pens stay visibly thicker than 1-unit cosmetic pens after
@@ -304,6 +299,20 @@
                 const oX = rd_i16(), oY = rd_i16();
                 const eX = rd_i16(), eY = rd_i16();
                 applyWindow(oX, oY, eX, eY);
+                break;
+            }
+            case WMF_OP.ELLIPSE: {
+                const left = rd_i16(), top = rd_i16();
+                const right = rd_i16(), bottom = rd_i16();
+                const cx = (left + right) / 2, cy = (top + bottom) / 2;
+                const rx = (right - left) / 2, ry = (bottom - top) / 2;
+                ctx.beginPath();
+                ctx.ellipse(cx, cy, Math.abs(rx), Math.abs(ry), 0, 0, Math.PI * 2);
+                ctx.strokeStyle = wmfColor(pen.color);
+                ctx.fillStyle   = wmfColor(brush.color);
+                ctx.lineWidth   = penWidth(pen.width);
+                if (brush.style !== 1) ctx.fill();
+                if (pen.style !== 5) ctx.stroke();
                 break;
             }
             case WMF_OP.BIT_COPY: {

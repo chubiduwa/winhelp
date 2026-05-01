@@ -33,6 +33,12 @@
 #define WMF_OP_SET_WINDOW        0x10  /* i16 orgX, orgY, extX, extY —
                                           mid-stream SetWindowOrg/Ext
                                           after BOUNDS has been locked. */
+#define WMF_OP_ELLIPSE           0x11  /* i16 left, top, right, bottom —
+                                          ellipse inscribed in rect,
+                                          stroke + fill from current
+                                          pen/brush. RECTANGLE has no
+                                          opcode; the parser emits a
+                                          4-point POLYGON instead. */
 
 /* Parse a decompressed WMF buffer and emit an opcode stream.
    On success, *out_ops points to a malloc'd buffer (caller frees) of
