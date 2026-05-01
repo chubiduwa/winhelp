@@ -115,13 +115,18 @@
         };
         applyWindow(orgX, orgY, extX, extY);
 
-        /* Snap a pen width up to the next integer device pixel so wider
-           pens stay visibly thicker than 1-unit cosmetic pens after
-           downscaling. lineWidth is in transformed coords so we divide
-           back by scale. (Matches refs/wmf/render.js.) */
+        /* Pen width in transformed (logical) coords with a 1-device-
+           pixel floor for cosmetic / sub-pixel pens. Matches GDI:
+           geometric pens scale with the transform and the rasterizer
+           picks the integer pixel count, so a width-3 pen at scale
+           ~0.35 draws 3*0.35 = 1.05 device px (rasterizes to 1 px) and
+           a width-13 pen at scale 0.097 draws 13*0.097 = 1.26 device px
+           (rasterizes to 1-2 px) — without us second-guessing it via a
+           ceil/round snap. The 1/scale floor keeps width-1 cosmetic
+           pens from disappearing at heavy downscales. */
         const penWidth = (w) => {
             if (!scale) return Math.max(w || 0, 1);
-            return Math.max(1, Math.ceil((w || 0) * scale)) / scale;
+            return Math.max(1 / scale, w || 0);
         };
 
         /* Track GDI pen/brush/fill-mode/font/text-color. Initial colors

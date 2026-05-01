@@ -30,6 +30,8 @@
 #define META_CREATEBRUSHINDIRECT  0x02FC
 #define META_POLYPOLYGON          0x0538
 #define META_DIBBITBLT            0x0940
+#define META_LINETO               0x0213
+#define META_MOVETO               0x0214
 #define META_TEXTOUT              0x0521
 #define META_EXTTEXTOUT           0x0A32
 #define META_DIBSTRETCHBLT        0x0B41
@@ -416,6 +418,13 @@ int wmf_parse(const uint8_t* data, size_t len,
        would corrupt the clip region. */
     int skip_mode = 0;
 
+    /* GDI's current position for META_MOVETO / META_LINETO. Starts at
+       (0,0); each MOVETO updates it; each LINETO emits a 2-point
+       polyline from the current position to the target and updates it.
+       (Connected segments could be coalesced but 2-pt polylines render
+       identically for thin pens, which covers our entire test corpus.) */
+    int16_t cur_x = 0, cur_y = 0;
+
     size_t off = 18;
     while (off + 6 <= len) {
         uint32_t rsize_words = get_u32(data, off);
@@ -642,6 +651,46 @@ int wmf_parse(const uint8_t* data, size_t len,
                 state.has_text_color = 1;
             }
             break;
+
+        case META_MOVETO: {
+            /* MS-WMF 2.3.5.10: Y, X. Just updates the current position;
+               doesn't draw. */
+            if (parm_len < 4) break;
+            cur_y = get_i16(parm, 0);
+            cur_x = get_i16(parm, 2);
+            break;
+        }
+
+        case META_LINETO: {
+            /* MS-WMF 2.3.3.10: Y, X. Draws a line from current position
+               to (X, Y) using the active pen, then updates the current
+               position to (X, Y). */
+            if (parm_len < 4) break;
+            int16_t y = get_i16(parm, 0);
+            int16_t x = get_i16(parm, 2);
+            if (skip_mode && building_path) {
+                cur_x = x; cur_y = y;
+                break;
+            }
+            if (building_path) {
+                /* Path-tracked LINETO: append a 2-point sub-poly so the
+                   path winds through the current point and (x,y). */
+                buf_u16(&path_sizes, 2);
+                buf_i16(&path_points, cur_x); buf_i16(&path_points, cur_y);
+                buf_i16(&path_points, x);     buf_i16(&path_points, y);
+                path_npoly++;
+                cur_x = x; cur_y = y;
+                break;
+            }
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            emit_pen_if_changed(&b, &state, &em);
+            buf_u8(&b, WMF_OP_POLYLINE);
+            buf_u16(&b, 2);
+            buf_i16(&b, cur_x); buf_i16(&b, cur_y);
+            buf_i16(&b, x);     buf_i16(&b, y);
+            cur_x = x; cur_y = y;
+            break;
+        }
 
         case META_TEXTOUT: {
             /* MS-WMF 2.3.3.20: StringLength (i16), String (StringLength
