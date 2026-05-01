@@ -1663,11 +1663,15 @@
         const h = location.hash.slice(1);
         if (!h) return { file: null, page: null, topic: 0 };
         const slash = h.indexOf('/');
-        if (slash < 0) return { file: h, page: null, topic: 0 };
-        const file = h.slice(0, slash);
+        /* Browsers percent-encode the fragment when it contains spaces
+           or other reserved chars, so always decode the file segment
+           before matching it against IndexedDB keys. */
+        const decode = s => { try { return decodeURIComponent(s); } catch { return s; } };
+        if (slash < 0) return { file: decode(h), page: null, topic: 0 };
+        const file = decode(h.slice(0, slash));
         const rest = h.slice(slash + 1);
         if (rest === 'topics' || rest === 'index') return { file, page: 'index', topic: 0, query: '' };
-        if (rest.startsWith('index/')) return { file, page: 'index', topic: 0, query: decodeURIComponent(rest.slice(6)) };
+        if (rest.startsWith('index/')) return { file, page: 'index', topic: 0, query: decode(rest.slice(6)) };
         const topic = rest.startsWith('topic-') ? parseInt(rest.slice(6)) : 0;
         return { file, page: null, topic, query: '' };
     }
