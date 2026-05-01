@@ -151,7 +151,7 @@ uint8_t* dib_to_rgba(uint32_t width, uint32_t height, uint16_t bpp,
 }
 
 static uint16_t g_last_img_w = 0, g_last_img_h = 0;
-static uint8_t g_last_img_type = 0; /* 5/6=bitmap(pixels), 8=metafile(twips) */
+static uint8_t g_last_img_type = 0; /* 5/6=bitmap(pixels), 8=metafile(HIMETRIC) */
 
 /* Decode a bitmap from |bm{index} and return PNG data */
 int hlp_decode_bitmap(HlpFile* hlp, uint32_t bm_index,
@@ -388,11 +388,11 @@ int hlp_get_wmf_bytes(HlpFile* hlp, uint32_t bm_index,
 
     if (type != 8) { hlp_set_error("not a metafile"); return -1; }
 
-    uint16_t mm = img_fetch_ushort(&ptr); /* mapping mode */
+    img_fetch_ushort(&ptr); /* mapping mode — unused; xExt/yExt are
+                               always HIMETRIC (0.01 mm) regardless. */
     uint16_t mf_w = get_u16(ptr, 0);
     uint16_t mf_h = get_u16(ptr, 2);
     ptr += 4;
-    (void)mm;
     g_last_img_w = mf_w;
     g_last_img_h = mf_h;
     g_last_img_type = 8;

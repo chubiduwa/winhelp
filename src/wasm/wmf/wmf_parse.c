@@ -23,6 +23,7 @@
 #define META_ELLIPSE              0x0418
 #define META_RECTANGLE            0x041B
 #define META_ESCAPE               0x0626
+#define META_EXCLUDECLIPRECT      0x0415
 #define META_INTERSECTCLIPRECT    0x0416
 #define META_DELETEOBJECT         0x01F0
 #define META_CREATEPENINDIRECT    0x02FA
@@ -995,13 +996,48 @@ int wmf_parse(const uint8_t* data, size_t len,
             break;
         }
 
+        case META_INTERSECTCLIPRECT: {
+            /* MS-WMF 2.3.5.3: YBottom, YRight, YTop, XLeft. Reuse the
+               polygon-based CLIP_INTERSECT opcode with a single 4-pt
+               poly. */
+            if (parm_len < 8) break;
+            int16_t bottom = get_i16(parm, 0);
+            int16_t right  = get_i16(parm, 2);
+            int16_t top    = get_i16(parm, 4);
+            int16_t left   = get_i16(parm, 6);
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            buf_u8(&b, WMF_OP_CLIP_INTERSECT);
+            buf_u16(&b, 1); /* nPoly */
+            buf_u16(&b, 4); /* sizes[0] */
+            buf_i16(&b, left);  buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, bottom);
+            buf_i16(&b, left);  buf_i16(&b, bottom);
+            break;
+        }
+
+        case META_EXCLUDECLIPRECT: {
+            /* MS-WMF 2.3.5.4: same record shape as INTERSECTCLIPRECT
+               but subtracts the rect from the current clip region. */
+            if (parm_len < 8) break;
+            int16_t bottom = get_i16(parm, 0);
+            int16_t right  = get_i16(parm, 2);
+            int16_t top    = get_i16(parm, 4);
+            int16_t left   = get_i16(parm, 6);
+            try_lock_bounds(&b, bounds_off, &state, ext_seen, org_seen, &bounds_locked, &last_emitted_org_x, &last_emitted_org_y, &last_emitted_ext_x, &last_emitted_ext_y);
+            buf_u8(&b, WMF_OP_CLIP_EXCLUDE_RECT);
+            buf_i16(&b, left); buf_i16(&b, top);
+            buf_i16(&b, right); buf_i16(&b, bottom);
+            break;
+        }
+
         /* Records still ignored: BkMode/MapMode/StretchBltMode set DC
-           state we don't yet need; clip-rect/region are TODO. */
+           state we don't yet need; SELECTCLIPREGION needs a region
+           object table (TODO). */
         case META_SETBKMODE:
         case META_SETMAPMODE:
         case META_SETSTRETCHBLTMODE:
         case META_SETTEXTALIGN:
-        case META_INTERSECTCLIPRECT:
         case META_SELECTCLIPREGION:
         default:
             break;

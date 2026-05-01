@@ -58,6 +58,13 @@
                                           cornerW, cornerH — rounded
                                           rectangle with elliptical
                                           corners of size (cw,ch). */
+#define WMF_OP_CLIP_EXCLUDE_RECT 0x15  /* i16 left, top, right, bottom —
+                                          subtract this rect from the
+                                          current clip region for
+                                          META_EXCLUDECLIPRECT.
+                                          (META_INTERSECTCLIPRECT is
+                                          encoded as a 1-poly
+                                          CLIP_INTERSECT.) */
 
 /* Parse a decompressed WMF buffer and emit an opcode stream.
    On success, *out_ops points to a malloc'd buffer (caller frees) of

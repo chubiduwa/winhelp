@@ -29,6 +29,7 @@
         DIB_BLIT: 0x0E, BIT_COPY: 0x0F,
         SET_WINDOW: 0x10, ELLIPSE: 0x11,
         PIXEL: 0x12, ARC: 0x13, ROUNDRECT: 0x14,
+        CLIP_EXCLUDE_RECT: 0x15,
     });
 
     /* COLORREF (0x00BBGGRR) -> CSS #RRGGBB. */
@@ -371,6 +372,32 @@
                 ctx.lineWidth   = penWidth(pen.width);
                 if (kind !== 0 && brush.style !== 1) ctx.fill();
                 if (pen.style !== 5) ctx.stroke();
+                break;
+            }
+            case WMF_OP.CLIP_EXCLUDE_RECT: {
+                const left  = rd_i16(), top    = rd_i16();
+                const right = rd_i16(), bottom = rd_i16();
+                /* Subtract this rect from the current clip region.
+                   Canvas2D has no exclude op, so clip with an evenodd
+                   path: a far-larger outer rect plus the inner rect.
+                   Their overlap (the inner) is "outside" under
+                   evenodd, so the resulting clip is everything else
+                   intersected with the previous clip. */
+                const HUGE = 1e9;
+                const x0 = Math.min(left, right), y0 = Math.min(top, bottom);
+                const x1 = Math.max(left, right), y1 = Math.max(top, bottom);
+                ctx.beginPath();
+                ctx.moveTo(-HUGE, -HUGE);
+                ctx.lineTo( HUGE, -HUGE);
+                ctx.lineTo( HUGE,  HUGE);
+                ctx.lineTo(-HUGE,  HUGE);
+                ctx.closePath();
+                ctx.moveTo(x0, y0);
+                ctx.lineTo(x1, y0);
+                ctx.lineTo(x1, y1);
+                ctx.lineTo(x0, y1);
+                ctx.closePath();
+                ctx.clip('evenodd');
                 break;
             }
             case WMF_OP.ROUNDRECT: {
@@ -760,7 +787,28 @@
                         const opsBytes = new Uint8Array(memory.buffer, opsPtr, opsLen).slice();
                         wasm.free(opsPtr);
                         wasm.free(slotsPtr);
-                        img.dataset.debug = `IMAGE bm=${bmIndex} pos=${imgPos} type=8 wmfops=${opsLen}bytes`;
+                        /* Size the <img> from the HLP-authored display
+                           dimensions. WinHelp stores WMF xExt/yExt in
+                           HIMETRIC units (1 unit = 0.01 mm; helpdeco
+                           hardcodes wInch=2540 in the synthesized APM
+                           header), so px = units * 96 / 2540. Without
+                           this we'd display every WMF at the renderer's
+                           internal canvas size (up to MAX_DIM=512), so
+                           a 304-unit (~11px) arrow icon would appear at
+                           ~512px — way too big. */
+                        const szPtr = wasm.malloc(6);
+                        wasm.hlp_get_last_image_size(szPtr, szPtr + 2, szPtr + 4);
+                        const szView = new DataView(memory.buffer);
+                        const dispW = szView.getUint16(szPtr, true);
+                        const dispH = szView.getUint16(szPtr + 2, true);
+                        wasm.free(szPtr);
+                        const wPx = Math.max(1, Math.round(dispW * 96 / 2540));
+                        const hPx = Math.max(1, Math.round(dispH * 96 / 2540));
+                        if (dispW && dispH) {
+                            img.width = wPx;
+                            img.height = hPx;
+                        }
+                        img.dataset.debug = `IMAGE bm=${bmIndex} pos=${imgPos} type=8 wmfops=${opsLen}bytes himetric=${dispW}x${dispH} disp=${wPx}x${hPx}`;
                         renderWmfToBlob(opsBytes).then(blob => {
                             img.src = URL.createObjectURL(blob);
                             img.dataset.debug += ` png=${blob.size}bytes`;
