@@ -573,8 +573,11 @@
         return canvas.convertToBlob({ type: 'image/png' });
     }
 
-    const { instance } = await WebAssembly.instantiateStreaming(
-        fetch('hlp.wasm?v=' + Date.now()),
+    const isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    const wasmUrl = 'hlp.wasm' + (isLocal ? '?v=' + Date.now() : '');
+    const wasmBytes = await fetch(wasmUrl).then(r => r.arrayBuffer());
+    const { instance } = await WebAssembly.instantiate(
+        wasmBytes,
         { env: { memory, js_log: jsLog } }
     );
 
