@@ -587,9 +587,24 @@
     const sticky = document.getElementById('sticky');
     const content = document.getElementById('content');
 
-    function showError() {
+    /* Read the WASM-side last error string (or fall back to a passed
+       label) and show it inline in the toolbar (right of the Reset
+       button). Doesn't replace page content, so the welcome screen or
+       current topic stays put. The element is created lazily by the
+       toolbar setup below. */
+    function showError(label) {
         const errPtr = wasm.hlp_get_error();
-        if (errPtr) content.textContent = 'Error: ' + readCString(errPtr);
+        const msg = errPtr ? readCString(errPtr) : null;
+        const text = label
+            ? (msg ? `${label}: ${msg}` : label)
+            : (msg ? `Error: ${msg}` : 'Unknown error');
+        if (errorMsg) {
+            errorMsg.querySelector('.text').textContent = text;
+            errorMsg.classList.add('shown');
+        }
+    }
+    function clearError() {
+        if (errorMsg) errorMsg.classList.remove('shown');
     }
 
     /* Build CSS classes from font table */
@@ -1825,10 +1840,6 @@
     }
 
     function openBytes(bytes, name, topicOffset) {
-        currentFileKey = fileBaseName(name);
-        currentHandle = 0;
-        syncFileSelect();
-
         const needed = bytes.length * 4 + 1024 * 1024; /* file x4 + 1MB overhead */
         const currentBytes = memory.buffer.byteLength;
         if (needed > currentBytes) {
@@ -1838,11 +1849,21 @@
         wasm.hlp_init();
 
         const ptr = wasm.malloc(bytes.length);
-        if (!ptr) { content.textContent = 'Error: malloc failed'; return; }
+        if (!ptr) { showError(`Could not load ${name}`); return false; }
         new Uint8Array(memory.buffer).set(bytes, ptr);
 
-        currentHandle = wasm.hlp_open(ptr, bytes.length);
-        if (!currentHandle) { showError(); return; }
+        const handle = wasm.hlp_open(ptr, bytes.length);
+        if (!handle) {
+            showError(`Could not open ${name}`);
+            wasm.free(ptr);
+            return false;
+        }
+        /* Open succeeded — commit the new state and clear any prior
+           error message. */
+        clearError();
+        currentFileKey = fileBaseName(name);
+        currentHandle = handle;
+        syncFileSelect();
 
         const infoPtr = wasm.hlp_get_info(currentHandle);
 
@@ -1931,6 +1952,7 @@
             location.hash = base;
         }
         resetBtn.disabled = false;
+        return true;
     }
 
     /* IndexedDB helpers */
@@ -2054,7 +2076,7 @@
             return;
         }
         const bytes = new Uint8Array(await file.arrayBuffer());
-        openBytes(bytes, file.name, 0);
+        if (!openBytes(bytes, file.name, 0)) return;
         await cacheFile(file.name, bytes.buffer);
         refreshFileSelect();
     }
@@ -2095,6 +2117,20 @@
         } catch {}
     };
     app.appendChild(resetBtn);
+
+    const errorMsg = document.createElement('span');
+    errorMsg.className = 'hlp-error-msg';
+    {
+        const text = document.createElement('span');
+        text.className = 'text';
+        const close = document.createElement('button');
+        close.textContent = '×';
+        close.title = 'Dismiss';
+        close.onclick = () => errorMsg.classList.remove('shown');
+        errorMsg.appendChild(text);
+        errorMsg.appendChild(close);
+    }
+    app.appendChild(errorMsg);
 
     const fileSelect = document.createElement('select');
     fileSelect.className = 'app-spacer';

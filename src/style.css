@@ -136,6 +136,28 @@ a.hlp-link-macro, a.hlp-link-macro span { color: #008000; cursor: pointer; }
     font-size: 12pt;
     cursor: pointer;
 }
+.hlp-error-msg {
+    color: #c0392b;
+    font-size: 10pt;
+    display: none;
+    align-items: center;
+    gap: 6px;
+}
+.hlp-error-msg.shown { display: inline-flex; }
+.hlp-error-msg button {
+    background: transparent;
+    border: 1px solid #c0392b;
+    color: #c0392b;
+    cursor: pointer;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    line-height: 1;
+    font-size: 11pt;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
 
 .hlp-topics-item {
     display: flex;
