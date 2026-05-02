@@ -1,0 +1,24 @@
+name: winhelp
+on:
+  push:
+    branches:
+      - main
+jobs:
+  build:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync
+        uses: actions/checkout@v2
+      - name: Build
+        run: |
+          cd $GITHUB_WORKSPACE
+          make
+      - name: FTP upload
+        uses: SamKirkland/FTP-Deploy-Action@4.0.0
+        with:
+          server: ftp.cluster129.hosting.ovh.net
+          username: winhelf
+          password: ${{ secrets.FTP_PASSWORD }}
+          local-dir: ./dist/
+          server-dir: ./www/
