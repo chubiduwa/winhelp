@@ -41,7 +41,7 @@ WOFF2 := $(patsubst fonts/%.ttf,fonts/woff2/%.woff2,$(TTF))
 DIST := dist
 OUT := $(DIST)/hlp.wasm
 
-STATIC := src/index.html src/main.js src/style.css
+STATIC := src/index.html src/main.js src/style.css src/robots.txt
 
 .PHONY: all clean setup serve watch fonts assets
 
