@@ -2118,6 +2118,7 @@
         showWelcome();
         resetBtn.disabled = true;
         syncFileSelect();
+        clearError();
     }
 
     const resetBtn = document.createElement('button');
