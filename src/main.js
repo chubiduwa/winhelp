@@ -587,24 +587,29 @@
     const sticky = document.getElementById('sticky');
     const content = document.getElementById('content');
 
-    /* Read the WASM-side last error string (or fall back to a passed
-       label) and show it inline in the toolbar (right of the Reset
-       button). Doesn't replace page content, so the welcome screen or
-       current topic stays put. The element is created lazily by the
-       toolbar setup below. */
-    function showError(label) {
-        const errPtr = wasm.hlp_get_error();
-        const msg = errPtr ? readCString(errPtr) : null;
-        const text = label
-            ? (msg ? `${label}: ${msg}` : label)
-            : (msg ? `Error: ${msg}` : 'Unknown error');
+    /* Show an error inline in the toolbar (right of the Reset button).
+       Doesn't replace page content, so the welcome screen or current
+       topic stays put. The element is created lazily by the toolbar
+       setup below. Callers that have a WASM-side error string should
+       compose the final message via wasmErrorMsg() and pass it here —
+       we don't read hlp_get_error() automatically because it isn't
+       cleared on success and could leak stale text into non-WASM
+       error reports. */
+    function showError(text) {
         if (errorMsg) {
-            errorMsg.querySelector('.text').textContent = text;
+            errorMsg.querySelector('.text').textContent = text || 'Unknown error';
             errorMsg.classList.add('shown');
         }
     }
     function clearError() {
         if (errorMsg) errorMsg.classList.remove('shown');
+    }
+    /* Compose `${label}: ${wasm error}` if the WASM side has one,
+       otherwise just the label. */
+    function wasmErrorMsg(label) {
+        const errPtr = wasm.hlp_get_error();
+        const msg = errPtr ? readCString(errPtr) : null;
+        return msg ? `${label}: ${msg}` : label;
     }
 
     /* Build CSS classes from font table */
@@ -1760,7 +1765,7 @@
         if (file && file !== (currentFileKey || '')) {
             const entry = await loadFileByKey(file);
             if (entry) {
-                openBytes(new Uint8Array(entry.bytes), entry.name, topic);
+                if (!openBytes(new Uint8Array(entry.bytes), entry.name, topic)) return;
                 if (page === 'index') renderIndexPage(query);
                 else if (state.scrollY != null) {
                     requestAnimationFrame(() => window.scrollTo(0, state.scrollY));
@@ -1794,7 +1799,7 @@
         if (file && file !== (currentFileKey || '')) {
             const entry = await loadFileByKey(file);
             if (entry) {
-                openBytes(new Uint8Array(entry.bytes), entry.name, topic);
+                if (!openBytes(new Uint8Array(entry.bytes), entry.name, topic)) return;
                 if (page === 'index') renderIndexPage(query);
                 updateNavButtons();
                 saveLastHash();
@@ -1849,12 +1854,12 @@
         wasm.hlp_init();
 
         const ptr = wasm.malloc(bytes.length);
-        if (!ptr) { showError(`Could not load ${name}`); return false; }
+        if (!ptr) { showError(`Could not load ${name}: out of memory`); return false; }
         new Uint8Array(memory.buffer).set(bytes, ptr);
 
         const handle = wasm.hlp_open(ptr, bytes.length);
         if (!handle) {
-            showError(`Could not open ${name}`);
+            showError(wasmErrorMsg(`Could not open ${name}`));
             wasm.free(ptr);
             return false;
         }
@@ -2065,19 +2070,30 @@
         }
         const entry = await loadFileByKey(key);
         if (!entry) return false;
-        openBytes(new Uint8Array(entry.bytes), entry.name, topic);
+        if (!openBytes(new Uint8Array(entry.bytes), entry.name, topic)) return false;
         saveLastHash();
         return true;
     }
 
     async function openFile(file) {
         if (!file.name.match(/\.hlp$/i)) {
-            alert('Please select a .HLP file');
+            showError(`${file.name} is not a .HLP file`);
             return;
         }
-        const bytes = new Uint8Array(await file.arrayBuffer());
+        let bytes;
+        try {
+            bytes = new Uint8Array(await file.arrayBuffer());
+        } catch (e) {
+            showError(`Could not read ${file.name}: ${e.message || e}`);
+            return;
+        }
         if (!openBytes(bytes, file.name, 0)) return;
-        await cacheFile(file.name, bytes.buffer);
+        try {
+            await cacheFile(file.name, bytes.buffer);
+        } catch (e) {
+            showError(`Could not cache ${file.name}: ${e.message || e}`);
+            /* Cache failure is non-fatal — the file is already open. */
+        }
         refreshFileSelect();
     }
 
