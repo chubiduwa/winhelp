@@ -20,7 +20,10 @@
 @font-face { font-family: "Wingdings"; src: url(fonts/wingding.woff2) format("woff2"); }
 @font-face { font-family: "Marlett"; src: url(fonts/marlett.woff2) format("woff2"); }
 
-html { overflow-y: scroll; }
+html {
+    overflow-y: scroll;
+    scrollbar-color: #a0a0a0 #dfdfdf;
+}
 
 ::-webkit-scrollbar { width: 16px; height: 16px; }
 ::-webkit-scrollbar-track {
@@ -28,7 +31,12 @@ html { overflow-y: scroll; }
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'><rect width='2' height='2' fill='%23c0c0c0'/><rect width='1' height='1' fill='%23fff'/><rect x='1' y='1' width='1' height='1' fill='%23fff'/></svg>");
     background-size: 2px 2px;
 }
-::-webkit-scrollbar-thumb,
+::-webkit-scrollbar-thumb {
+    background-color: #a0a0a0;
+    border: 1px solid;
+    border-color: #fff #000 #000 #fff;
+    box-shadow: inset -1px -1px 0 #707070, inset 1px 1px 0 #c0c0c0;
+}
 ::-webkit-scrollbar-button {
     background-color: #c0c0c0;
     border: 1px solid;
