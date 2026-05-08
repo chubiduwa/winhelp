@@ -1,4 +1,5 @@
 (async function() {
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
     let decoder = new TextDecoder();
     const memory = new WebAssembly.Memory({ initial: 17 });
 
@@ -1738,6 +1739,7 @@
 
         const pageTopic = getPageTopic(offset);
         if (pageTopic !== currentPageTopic) {
+            window.scrollTo(0, 0);
             renderPage(pageTopic);
             updateScrollPadding();
         }
