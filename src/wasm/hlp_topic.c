@@ -402,19 +402,30 @@ static void render_paragraph(HlpFile* hlp, uint8_t* buf, uint8_t* end, uint32_t 
         format += ncol * 4;
     }
 
-    int16_t lastcol = -1;
+    int16_t prevcol = -1;
     for (;;) {
-        /* For tables, read column index from format stream */
+        /* For tables, read column index from format stream.
+           Per helpfile.txt: col == -1 marks end of TABLE (not just one row).
+           Rows transition when col goes back to 0 (or any value <= prevcol).
+           col == prevcol means a paragraph continuation in the same cell. */
         if (rec_type == 0x23) {
             int16_t col = get_i16(format, 0);
             if (col == -1) {
-                /* End of row */
-                emit_u8(OP_TABLE_ROW_END);
+                if (prevcol >= 0) emit_u8(OP_TABLE_ROW_END);
                 break;
             }
-            lastcol = col;
+            if (prevcol == -1) {
+                emit_u8(OP_TABLE_CELL);                /* first cell, first row */
+            } else if (col == prevcol) {
+                /* same cell, new paragraph — no separator */
+            } else if (col < prevcol) {
+                emit_u8(OP_TABLE_ROW_END);             /* new row */
+                emit_u8(OP_TABLE_CELL);
+            } else {
+                emit_u8(OP_TABLE_CELL);                /* next cell, same row */
+            }
+            prevcol = col;
             format += 5; /* column(2) + unknown(2) + always0(1) */
-            if (col > 0) emit_u8(OP_TABLE_CELL);
         }
 
         /* Skip per-paragraph header */

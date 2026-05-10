@@ -672,34 +672,15 @@
         let pendingParaFmt = null;
         let needNewBlock = true; /* first content creates a block */
 
-        let inTable = false;
+        let currentTable = null;
+        let currentRow = null;
+        let activeCell = null;
         let nsrParent = null;
 
         function applyParaBlock() {
-            /* In table context, apply borders to the <td> but don't create a new div */
-            if (inTable && currentPara && currentPara.tagName === 'TD') {
-                needNewBlock = false;
-                currentSpan = null;
-                currentLink = null;
-                const f = pendingParaFmt;
-                if (f && f.borderFlags) {
-                    const bf = f.borderFlags;
-                    const thick = bf & 0x20;
-                    const dbl = bf & 0x40;
-                    const bdrStyle = dbl ? 'double' : 'solid';
-                    const bdrW = thick ? (dbl ? 5 : 3) : (dbl ? 3 : 1);
-                    const bdr = `${bdrW}px ${bdrStyle} #000`;
-                    if (bf & 0x01) currentPara.style.border = bdr;
-                    else {
-                        if (bf & 0x02) currentPara.style.borderTop = bdr;
-                        if (bf & 0x04) currentPara.style.borderLeft = bdr;
-                        if (bf & 0x08) currentPara.style.borderBottom = bdr;
-                        if (bf & 0x10) currentPara.style.borderRight = bdr;
-                    }
-                }
-                return;
-            }
-            /* Create a new <div> block with the current paragraph formatting */
+            /* Create a new <div> block with the current paragraph formatting.
+               Inside a table cell, the div nests under the <td>; outside, under the container. */
+            const paraHost = activeCell || container;
             currentPara = document.createElement('div');
             currentPara.className = 'hlp-para';
             currentSpan = null;
@@ -707,7 +688,7 @@
             needNewBlock = false;
 
             const f = pendingParaFmt;
-            if (!f) { container.appendChild(currentPara); return; }
+            if (!f) { paraHost.appendChild(currentPara); return; }
 
             currentPara.id = 'topic-' + f.paraOffset;
             currentPara._tabStops = f.tabStops;
@@ -763,7 +744,7 @@
 
             currentPara.dataset.debug = `PARA off=${f.paraOffset} flags=0x${f.pflags.toString(16)} sb=${f.spaceBefore} sa=${f.spaceAfter} ls=${f.lineSpace} li=${f.indentLeft} fi=${f.indentFirst} tabs=[${f.tabStops}]`;
 
-            container.appendChild(currentPara);
+            paraHost.appendChild(currentPara);
         }
         let title = '';
         let browseBwd = 0xFFFFFFFF;
@@ -1093,46 +1074,47 @@
                     const totalWidth = (lastCx - trLeft) * hlpScale / 20;
                     if (totalWidth > 0) table.style.minWidth = totalWidth + 'pt';
                 }
-                /* Fixed tables: apply trleft + trgaph */
-                const netLeft = (trLeft + trGapH) * hlpScale / 20;
-                if (Math.abs(netLeft) > 0.5) table.style.marginLeft = netLeft + 'pt';
                 container.appendChild(table);
-                const tr = document.createElement('tr');
-                table.appendChild(tr);
-                currentPara = document.createElement('td');
-                tr.appendChild(currentPara);
-                currentSpan = null;
-                needNewBlock = false;
-                inTable = true;
-                break;
-            }
-            case 0x0C: { /* TABLE_CELL */
-                const tr = currentPara && currentPara.closest ? currentPara.closest('tr') : null;
-                if (tr) {
-                    currentPara = document.createElement('td');
-                    tr.appendChild(currentPara);
-                }
-                currentSpan = null;
-                needNewBlock = false;
-                break;
-            }
-            case 0x0D: { /* TABLE_ROW_END */
-                const tbl = container.querySelector('table.hlp-table:last-of-type');
-                if (tbl) {
-                    const tr2 = document.createElement('tr');
-                    tbl.appendChild(tr2);
-                    currentPara = document.createElement('td');
-                    tr2.appendChild(currentPara);
-                }
-                currentSpan = null;
-                needNewBlock = false;
-                break;
-            }
-            case 0x0E: /* TABLE_END */
+                currentTable = table;
+                currentRow = null;
+                activeCell = null;
                 currentPara = null;
                 currentSpan = null;
+                currentLink = null;
                 needNewBlock = true;
-                inTable = false;
+                break;
+            }
+            case 0x0C: { /* TABLE_CELL — start a new cell, opening a new row if needed */
+                if (currentTable) {
+                    if (!currentRow) {
+                        currentRow = document.createElement('tr');
+                        currentTable.appendChild(currentRow);
+                    }
+                    activeCell = document.createElement('td');
+                    currentRow.appendChild(activeCell);
+                }
+                currentPara = null;
+                currentSpan = null;
+                currentLink = null;
+                needNewBlock = true;
+                break;
+            }
+            case 0x0D: /* TABLE_ROW_END — close current row; next TABLE_CELL opens a new one */
+                currentRow = null;
+                activeCell = null;
+                currentPara = null;
+                currentSpan = null;
+                currentLink = null;
+                needNewBlock = true;
+                break;
+            case 0x0E: /* TABLE_END */
+                currentTable = null;
+                currentRow = null;
+                activeCell = null;
+                currentPara = null;
+                currentSpan = null;
+                currentLink = null;
+                needNewBlock = true;
                 break;
             case 0x0F: { /* MACRO */
                 const mLen = buf.getUint16(off, true); off += 2;
@@ -2242,7 +2224,7 @@
         return filterInput;
     }
 
-    function addListItem(text, iconSrc, filterKey, onclick) {
+    function addListItem(text, iconSrc, filterKey, onclick, href) {
         const item = document.createElement('div');
         item.className = 'hlp-topics-item';
         item.dataset.kw = filterKey;
@@ -2251,7 +2233,7 @@
         icon.className = 'hlp-topics-icon';
         item.appendChild(icon);
         const a = document.createElement('a');
-        a.href = '#';
+        a.href = href || '#';
         a.textContent = text;
         a.onclick = e => { e.preventDefault(); onclick(); };
         item.appendChild(a);
@@ -2287,6 +2269,7 @@
                 if (offsets.length === 1) {
                     const off = offsets[0];
                     entries.push({ text, key: text.toLowerCase(),
+                        href: `#${currentFileKey}/topic-${off}`,
                         onclick: () => navigateTo(off) });
                 } else {
                     entries.push({ text, key: text.toLowerCase(),
@@ -2306,6 +2289,7 @@
             if (seenOffsets.has(offset)) continue;
             seenOffsets.add(offset);
             entries.push({ text: title, key: title.toLowerCase(),
+                href: `#${currentFileKey}/topic-${offset}`,
                 onclick: () => navigateTo(offset) });
         }
 
@@ -2317,7 +2301,7 @@
         if (headerPage) headerPage.textContent = `${entries.length} entries`;
 
         for (const e of entries) {
-            addListItem(e.text, 'icons/topic.png', e.key, e.onclick);
+            addListItem(e.text, 'icons/topic.png', e.key, e.onclick, e.href);
         }
 
         function applyFilter(val) {
