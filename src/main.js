@@ -733,12 +733,13 @@
             /* Tab stops in WinHelp are absolute positions measured from
                the paragraph's left margin column (not the indented
                content edge). CSS tab-size only takes an interval, so
-               we approximate by using the first stop minus the
-               paragraph's own left indent — that way a leading bullet/
-               icon followed by a tab lands at the same absolute column
-               as a non-indented paragraph below. */
+               we approximate by using the first stop minus where the
+               first line actually starts — that way a leading bullet
+               or hanging-indent keyword followed by a tab lands at the
+               same absolute column as a non-indented paragraph below. */
             if (f.tabStops.length > 0) {
-                const interval = tw(f.tabStops[0]) - tw(f.indentLeft || 0);
+                const startCol = (f.indentLeft || 0) + (f.indentFirst || 0);
+                const interval = tw(f.tabStops[0]) - tw(startCol);
                 currentPara.style.tabSize = Math.max(0, interval) + 'pt';
             }
 
